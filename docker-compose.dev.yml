@@ -53,6 +53,11 @@ services:
       - ALIGN_NUM_REPLICAS=${ALIGN_NUM_REPLICAS:-}
       - DIARIZE_NUM_REPLICAS=${DIARIZE_NUM_REPLICAS:-}
       - GPU_CONCURRENCY=${GPU_CONCURRENCY:-1}
+      # Diarization hyperparameter tuning (optional; unset = community-1 defaults)
+      - DIARIZE_CLUSTERING_THRESHOLD=${DIARIZE_CLUSTERING_THRESHOLD:-}
+      - DIARIZE_MIN_DURATION_OFF=${DIARIZE_MIN_DURATION_OFF:-}
+      - DIARIZE_PARAM_OVERRIDES=${DIARIZE_PARAM_OVERRIDES:-}
+      - DIARIZE_FILL_NEAREST=${DIARIZE_FILL_NEAREST:-false}
 
     volumes:
       # Persistent cache for models (recommended)
