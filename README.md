@@ -823,13 +823,35 @@ docker compose down && docker compose up -d
 
 The service will now operate without any network requests to Hugging Face.
 
+### Air-Gapped Transfer (no internet on the target machine)
+
+If the machine that runs the service has no internet at all, populate the cache on an internet-connected machine and move it across as data. Do not rely on `docker commit`: the cache lives in a named Docker volume (`whisperx-cache:/.cache`), and `docker commit` captures only the container filesystem, not volume contents, so a committed-and-exported image arrives with an empty cache and fails to find the models at startup (the Swagger UI will also fail to load).
+
+1. On the online machine, run one transcription with diarization (see above) so every model is cached.
+2. Export the cache volume to a tarball:
+   ```bash
+   docker run --rm -v whisperx-cache:/cache -v "$PWD":/out alpine \
+     tar czf /out/whisperx-cache.tgz -C /cache .
+   ```
+3. Transfer `whisperx-cache.tgz` and the image (`docker save IMAGE | gzip > image.tgz`) to the target machine.
+4. On the target machine, load the image, extract the cache, and bind-mount it instead of a named volume:
+   ```bash
+   mkdir -p /srv/whisperx-cache
+   tar xzf whisperx-cache.tgz -C /srv/whisperx-cache
+   docker run -d --gpus all -p 9000:9000 \
+     -e HF_HUB_OFFLINE=1 \
+     -v /srv/whisperx-cache:/.cache \
+     learnedmachine/whisperx-asr-service:latest
+   ```
+   On RTX 50xx / Blackwell cards use the `:0.3.2-blackwell` image and keep `COMPUTE_TYPE=float16` (the CTranslate2 INT8 path is not supported on Blackwell).
+
 ### What Gets Cached
 
 | Component | Cache Location | Notes |
 |-----------|---------------|-------|
 | Whisper models | `/.cache/models--Systran--faster-whisper-*` | Downloaded on first use |
 | Alignment model | `/.cache/wav2vec2_*.pth` | Downloaded on first alignment |
-| Pyannote models | `/.cache/huggingface/hub/models--pyannote--*` | Downloaded on first diarization |
+| Pyannote models | `/.cache/hub/models--pyannote--*` | Downloaded on first diarization |
 | NLTK tokenizers | `/.cache/nltk_data/` | Pre-downloaded in Docker image |
 
 ### Troubleshooting Offline Mode
@@ -837,7 +859,7 @@ The service will now operate without any network requests to Hugging Face.
 If you see errors like `Failed to resolve 'huggingface.co'`:
 1. Ensure you ran a full transcription with diarization while online
 2. Verify `HF_HUB_OFFLINE=1` is set in `docker-compose.yml` (not `.env`)
-3. Check the cache volume contains the models: `docker exec whisperx-asr-api ls -la /.cache/huggingface/hub/`
+3. Check the cache volume contains the models: `docker exec whisperx-asr-api ls -la /.cache/` (faster-whisper models) and `docker exec whisperx-asr-api ls -la /.cache/hub/` (pyannote/HuggingFace models)
 
 ## Troubleshooting
 
