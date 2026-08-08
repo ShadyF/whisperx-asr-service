@@ -1,0 +1,74 @@
+name: Build and Publish Spark Image (arm64)
+
+# DGX Spark (GB10) variant: linux/arm64, CUDA 13, torch 2.12/cu130, with
+# CTranslate2 compiled from source for sm_121 (see Dockerfile.spark).
+#
+# Runs on release tags like the main workflow, and additionally supports
+# workflow_dispatch, which publishes a :spark-test tag so the variant can be
+# validated on real hardware before a release.
+#
+# The maintainer has no DGX Spark hardware; this image is built in CI and
+# relies on community validation.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/whisperx-asr-service
+
+jobs:
+  build-spark:
+    runs-on: ubuntu-24.04-arm
+    name: Build Spark image (torch 2.12, cu130, arm64)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Verify version matches tag
+        if: github.event_name == 'push'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          FILE_VERSION=$(python3 -c "exec(open('app/version.py').read()); print(__version__)")
+          if [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
+            echo "::error::Version mismatch: tag is v${TAG_VERSION} but app/version.py has ${FILE_VERSION}"
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (Spark)
+        id: meta-spark
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          flavor: |
+            latest=false
+            suffix=-spark,onlatest=true
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=spark,suffix=,enable=${{ github.event_name == 'push' }}
+            type=raw,value=spark-test,suffix=,enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Build and push Docker image (Spark)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile.spark
+          push: true
+          tags: ${{ steps.meta-spark.outputs.tags }}
+          labels: ${{ steps.meta-spark.outputs.labels }}
+          cache-from: type=gha,scope=spark
+          cache-to: type=gha,mode=max,scope=spark
+          platforms: linux/arm64

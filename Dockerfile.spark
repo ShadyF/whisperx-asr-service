@@ -1,0 +1,122 @@
+# WhisperX ASR API Service - DGX Spark variant (linux/arm64, CUDA 13)
+#
+# Targets NVIDIA DGX Spark (GB10, sm_121). Based on the recipe contributed
+# and hardware-tested by @rjackr in PR #23, restructured onto the compact
+# image layout and pinned to a CTranslate2 release.
+#
+# PyPI publishes no CUDA-enabled aarch64 CTranslate2 wheels, so stage 1
+# compiles CTranslate2 from source with sm_121 support on a CUDA 13 devel
+# image. The final stage is the same ubuntu:22.04 layout as the main
+# Dockerfile.
+#
+# MAINTAINER NOTE: this variant is built in CI but cannot be run by the
+# maintainer (no DGX Spark hardware). It relies on community validation.
+ARG TORCH_VERSION=2.12.0+cu130
+ARG TORCHAUDIO_VERSION=2.11.0+cu130
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
+ARG CTRANSLATE2_REF=v4.8.1
+
+# ---------------------------------------------------------------------------
+# Stage 1: build CTranslate2 with CUDA + sm_121
+# ---------------------------------------------------------------------------
+FROM nvidia/cuda:13.1.2-cudnn-devel-ubuntu22.04 AS ct2-builder
+
+ARG CTRANSLATE2_REF
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3-pip python3-dev git cmake build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --recursive --branch ${CTRANSLATE2_REF} --depth 1 \
+        https://github.com/OpenNMT/CTranslate2.git /tmp/ctranslate2 && \
+    cd /tmp/ctranslate2 && \
+    # Append sm_121 (GB10) after the arch flag generation; the bundled CMake
+    # arch parser does not know Blackwell-generation compute capabilities.
+    sed -i '/cuda_select_nvcc_arch_flags(ARCH_FLAGS ${CUDA_ARCH_LIST})/a \    list(APPEND ARCH_FLAGS "-gencode;arch=compute_121,code=sm_121")' CMakeLists.txt && \
+    mkdir build && cd build && \
+    cmake -DWITH_CUDA=ON \
+          -DCUDA_ARCH_LIST="9.0" \
+          -DWITH_MKL=OFF \
+          -DOPENMP_RUNTIME=COMP .. && \
+    make -j$(nproc) install && \
+    cd ../python && \
+    pip3 install --no-cache-dir pybind11 wheel setuptools && \
+    pip3 wheel --no-deps -w /ct2-wheel . && \
+    ls /ct2-wheel
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime image (same layout as the main Dockerfile)
+# ---------------------------------------------------------------------------
+FROM ubuntu:22.04
+
+ARG TORCH_VERSION
+ARG TORCHAUDIO_VERSION
+ARG TORCH_INDEX_URL
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /workspace
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    ffmpeg \
+    git \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ct2-builder /ct2-wheel /tmp/ct2-wheel
+COPY --from=ct2-builder /usr/local/lib/libctranslate2* /usr/local/lib/
+RUN ldconfig
+
+# Single layer: CTranslate2 wheel first so nothing pulls the CPU-only PyPI
+# build, then torch pin -> WhisperX (silently upgrades torch) -> pyannote ->
+# torch re-pin -> transformers -> API deps.
+RUN python3 -m pip install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir /tmp/ct2-wheel/*.whl && rm -rf /tmp/ct2-wheel && \
+    pip3 install --no-cache-dir \
+        torch==${TORCH_VERSION} \
+        torchaudio==${TORCHAUDIO_VERSION} \
+        --index-url ${TORCH_INDEX_URL} && \
+    pip3 install --no-cache-dir git+https://github.com/sealambda/whisperX.git@feat/pyannote-audio-4 && \
+    sed -i 's/use_token=/token=/g' \
+        /usr/local/lib/python3.10/dist-packages/whisperx/diarize.py && \
+    pip3 install --no-cache-dir --upgrade pyannote.audio && \
+    pip3 install --no-cache-dir \
+        torch==${TORCH_VERSION} \
+        torchaudio==${TORCHAUDIO_VERSION} \
+        --index-url ${TORCH_INDEX_URL} && \
+    pip3 install --no-cache-dir "transformers>=5.13,<6" && \
+    pip3 install --no-cache-dir \
+        fastapi==0.104.1 \
+        "uvicorn[standard]==0.24.0" \
+        python-multipart==0.0.6 \
+        pydantic==2.5.0 \
+        prometheus-client==0.20.0 \
+        "ray[serve]>=2.9" \
+        "protobuf<7"
+
+# Prefer torch's bundled cuDNN over any system cuDNN
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:/usr/local/lib
+
+# Pre-download NLTK data for timestamp alignment (enables offline use)
+RUN python3 -c "import nltk; nltk.download('punkt_tab', download_dir='/.cache/nltk_data')"
+ENV NLTK_DATA=/.cache/nltk_data
+
+RUN mkdir -p /.cache && chmod 777 /.cache
+ENV HF_HOME=/.cache
+
+COPY app /workspace/app
+COPY entrypoint.sh /workspace/entrypoint.sh
+RUN chmod +x /workspace/entrypoint.sh
+
+EXPOSE 9000 8265
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python3 -c "import requests; requests.get('http://localhost:9000/health')" || exit 1
+
+ENV SERVE_MODE=simple
+
+CMD ["/workspace/entrypoint.sh"]

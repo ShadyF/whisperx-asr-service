@@ -87,15 +87,25 @@ figures for concurrent requests and larger batches.*
 
 ## Image Variants
 
-Two prebuilt Docker images are published per release. They differ only in the
-PyTorch wheel they ship; the application code is identical.
+Three prebuilt Docker images are published per release. They differ in the
+PyTorch wheel and platform they ship; the application code is identical.
 
-| Tag | PyTorch | CUDA wheels | Supported GPUs |
-|-----|---------|-------------|----------------|
-| `:latest`, `:vX.Y.Z` | 2.7.1 | cu126 | Pascal (10xx) through Hopper. Compatible with the broadest GPU range. |
-| `:blackwell`, `:vX.Y.Z-blackwell` | 2.8.0 | cu128 | Blackwell (RTX 50xx). Drops Pascal/Maxwell support per the PyTorch 2.8 cuDNN/CUDA 12.8 build. |
+| Tag | PyTorch | CUDA wheels | Platform | Supported GPUs |
+|-----|---------|-------------|----------|----------------|
+| `:latest`, `:X.Y.Z` | 2.7.1 | cu126 | amd64 | Pascal (10xx) through Hopper. Compatible with the broadest GPU range. |
+| `:blackwell`, `:X.Y.Z-blackwell` | 2.8.0 | cu128 | amd64 | Blackwell (RTX 50xx). Drops Pascal/Maxwell support per the PyTorch 2.8 cuDNN/CUDA 12.8 build. |
+| `:spark`, `:X.Y.Z-spark` | 2.12.0 | cu130 | arm64 | NVIDIA DGX Spark (GB10, sm_121). CTranslate2 compiled from source. |
 
-If you have an RTX 50xx, use the `-blackwell` tag. Everyone else: use `:latest`.
+If you have an RTX 50xx, use the `-blackwell` tag. On a DGX Spark, use the
+`-spark` tag. Everyone else: use `:latest`.
+
+**Tested hardware disclaimer.** I develop and test on RTX 3090 (Ampere)
+hardware only. The default `:latest` images are validated end to end on that
+hardware before release. The `-blackwell` and `-spark` variants are built
+from the same source in CI but I cannot run them; they rely on community
+validation. The Spark recipe was contributed and hardware-tested by the
+community (PR #23). Please report regressions on these variants in the
+issues.
 
 To build a custom variant locally, override the build args:
 
