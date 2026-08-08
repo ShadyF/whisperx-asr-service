@@ -762,6 +762,32 @@ the rest into it; context hints do not prevent this. Speaker segments are
 always rebuilt at speaker-change boundaries on this backend (see
 `RESEGMENT_BY_SPEAKER` below for the whisper backend).
 
+### External ASR Backend (Experimental)
+
+Setting `ASR_BACKEND=external` outsources only the transcription stage to
+an OpenAI-compatible API; alignment, diarization, speaker embeddings, and
+voice profiles keep running locally. Be aware that your audio is uploaded
+to the configured provider, which is why this is strictly opt-in.
+
+```bash
+ASR_BACKEND=external
+EXTERNAL_ASR_BASE_URL=https://api.openai.com/v1
+EXTERNAL_ASR_API_KEY=sk-...
+EXTERNAL_ASR_MODEL=whisper-1
+# EXTERNAL_ASR_MODE=transcriptions   # default; or "chat" for audio-input
+                                     # chat models (OpenRouter, vLLM)
+```
+
+How word timestamps are produced depends on the provider response.
+Providers that return timestamped segments (whisper-1 `verbose_json`,
+Groq, self-hosted Whisper servers) feed the existing Wav2Vec2 alignment
+stage directly. Text-only providers (gpt-4o-transcribe, Voxtral or other
+audio models through OpenRouter's chat API, VibeVoice via vLLM) are
+word-timestamped by the Qwen forced aligner instead, which downloads on
+first use (~1.2 GB) and adds about 1 GB of VRAM. `task=translate` falls
+back to the whisper backend, and the requested Whisper model name is
+ignored.
+
 ## Running the Service
 
 ```bash

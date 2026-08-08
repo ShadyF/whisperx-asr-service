@@ -249,11 +249,14 @@ class ASRIngress:
                     task=task, initial_prompt=initial_prompt,
                     hotwords=hotwords,
                 )
-                # qwen3 segments are ~5-minute chunks until aligned, so
-                # speaker assignment needs word timestamps even if the
-                # caller did not request them.
-                is_qwen3 = result.get("_asr_backend") == "qwen3"
-                if word_timestamps or (should_diarize and is_qwen3):
+                # qwen3 and text-only external segments are coarse chunks
+                # until aligned, so speaker assignment needs word timestamps
+                # even if the caller did not request them.
+                internally_aligned = (
+                    result.get("_asr_backend") == "qwen3"
+                    or result.get("_qwen_align")
+                )
+                if word_timestamps or (should_diarize and internally_aligned):
                     result = await self._align.align.remote(audio, result)
                 speaker_embeddings = None
                 if should_diarize:
@@ -263,12 +266,13 @@ class ASRIngress:
                         max_speakers=max_speakers,
                         return_speaker_embeddings=return_speaker_embeddings,
                     )
-                if not word_timestamps and is_qwen3:
+                if not word_timestamps and internally_aligned:
                     result.pop("word_segments", None)
                     for seg in result.get("segments", []):
                         seg.pop("words", None)
                 result.pop("_asr_backend", None)
                 result.pop("_language_name", None)
+                result.pop("_qwen_align", None)
 
             detected_language = result.get("language", language or "en")
             metric_status = "ok"
