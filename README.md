@@ -11,14 +11,14 @@
 
 A simple ASR API service powered by WhisperX for transcription with speaker diarization. Built for self-hosters running [Speakr](https://github.com/murtaza-nasir/speakr) or similar applications.
 
-> **v0.3.2: two Docker image variants are now published per release.**
+> **Two Docker image variants are published per release.**
 >
-> | Your GPU | Pull this tag |
+> | Device | Pull this tag |
 > |----------|---------------|
-> | **RTX 50xx (Blackwell)** | `learnedmachine/whisperx-asr-service:blackwell` (PyTorch 2.8.0 / cu128) |
-> | Anything else (10xx, 20xx, 30xx, 40xx, A-series, H-series) | `learnedmachine/whisperx-asr-service:latest` (PyTorch 2.7.1 / cu126) |
+> | **RTX 50xx GPU (Blackwell)** | `learnedmachine/whisperx-asr-service:blackwell` (PyTorch 2.8.0 / cu128) |
+> | CPU or any other NVIDIA GPU (10xx, 20xx, 30xx, 40xx, A-series, H-series) | `learnedmachine/whisperx-asr-service:latest` (PyTorch 2.7.1 / cu126) |
 >
-> The `:latest` tag was previously broken on Pascal cards. v0.3.2 fixes this by re-pinning torch after the WhisperX install. See [Image Variants](#image-variants) and [Changelog](#changelog).
+> See [Image Variants](#image-variants) for details.
 
 ## What This Does
 
