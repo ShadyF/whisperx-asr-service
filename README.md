@@ -788,6 +788,12 @@ first use (~1.2 GB) and adds about 1 GB of VRAM. `task=translate` falls
 back to the whisper backend, and the requested Whisper model name is
 ignored.
 
+Set `EXTERNAL_ASR_ALIGNER=qwen` to force the Qwen forced aligner even for
+timestamped responses; it is language-agnostic across its supported set
+and handles code-switched audio, unlike the per-language Wav2Vec2 models.
+The reverse is not configurable: Wav2Vec2 requires segment timestamps, so
+text-only responses always use the Qwen aligner.
+
 ## Running the Service
 
 ```bash

@@ -72,6 +72,7 @@ services:
       - EXTERNAL_ASR_API_KEY=${EXTERNAL_ASR_API_KEY:-}
       - EXTERNAL_ASR_MODEL=${EXTERNAL_ASR_MODEL:-}
       - EXTERNAL_ASR_MODE=${EXTERNAL_ASR_MODE:-}
+      - EXTERNAL_ASR_ALIGNER=${EXTERNAL_ASR_ALIGNER:-}
 
     volumes:
       # Persistent cache for models (recommended)
