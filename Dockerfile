@@ -72,14 +72,17 @@ RUN pip3 install --no-cache-dir \
 # The qwen3_asr architecture is natively supported from transformers 5.13.
 RUN pip3 install --no-cache-dir "transformers>=5.13,<6"
 
-# Install API dependencies
+# Install API dependencies. protobuf is pinned below 7: protobuf 7.x removed
+# FieldDescriptor.label, which Ray Serve's proto handling still uses, and an
+# unpinned fresh build resolves to 7.x and crashes ray mode at deploy time.
 RUN pip3 install --no-cache-dir \
     fastapi==0.104.1 \
     uvicorn[standard]==0.24.0 \
     python-multipart==0.0.6 \
     pydantic==2.5.0 \
     prometheus-client==0.20.0 \
-    "ray[serve]>=2.9"
+    "ray[serve]>=2.9" \
+    "protobuf<7"
 
 # Pre-download NLTK data for timestamp alignment (enables offline use)
 RUN python3 -c "import nltk; nltk.download('punkt_tab', download_dir='/.cache/nltk_data')"
