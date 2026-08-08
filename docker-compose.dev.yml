@@ -31,6 +31,7 @@ services:
       # All values loaded from .env file
       - DEVICE=${DEVICE:-cuda}
       - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}
+      - ALIGN_DEVICE=${ALIGN_DEVICE:-}
       - BATCH_SIZE=${BATCH_SIZE:-16}
       - HF_TOKEN=${HF_TOKEN}
       - CACHE_DIR=${CACHE_DIR:-/.cache}

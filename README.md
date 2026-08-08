@@ -491,6 +491,11 @@ DEVICE=cuda              # cuda for GPU, cpu for CPU-only
 # Computation precision
 COMPUTE_TYPE=float16     # float16 (GPU), float32 (CPU), int8 (faster, lower quality)
 
+# Alignment stage device (defaults to DEVICE). cpu keeps the Wav2Vec2
+# alignment model off the GPU to reduce VRAM on small cards, at the cost
+# of slower word timestamps.
+# ALIGN_DEVICE=cpu
+
 # Batch size (higher = faster but more memory). Default is device-aware:
 # 16 on cuda, 2 on cpu. Long audio on CPU benefits from BATCH_SIZE=1.
 BATCH_SIZE=16           # 16 for 8GB VRAM, 32+ for high-end GPUs, 1-2 on CPU

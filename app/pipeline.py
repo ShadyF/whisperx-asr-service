@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "float16" if DEVICE == "cuda" else "int8")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16" if DEVICE == "cuda" else "2"))
+# Device for the Wav2Vec2 alignment stage. Defaults to DEVICE; set
+# ALIGN_DEVICE=cpu to keep alignment off the GPU and reduce VRAM at the cost
+# of slower word timestamps (issue #32).
+ALIGN_DEVICE = os.getenv("ALIGN_DEVICE", "").strip().lower() or DEVICE
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
 DEFAULT_MODEL = os.getenv("PRELOAD_MODEL", "large-v3")
@@ -314,10 +318,13 @@ def load_align_model(language_code: str):
     if language_code not in _align_models:
         with _model_load_lock:
             if language_code not in _align_models:
-                logger.info(f"Loading alignment model for language: {language_code}")
+                logger.info(
+                    f"Loading alignment model for language: {language_code} "
+                    f"on {ALIGN_DEVICE}"
+                )
                 model_a, metadata = whisperx.load_align_model(
                     language_code=language_code,
-                    device=DEVICE,
+                    device=ALIGN_DEVICE,
                     model_dir=CACHE_DIR,
                 )
                 _align_models[language_code] = (model_a, metadata)
@@ -531,7 +538,7 @@ def align(audio: np.ndarray, result: dict) -> dict:
             model_a,
             metadata,
             audio,
-            DEVICE,
+            ALIGN_DEVICE,
             return_char_alignments=False,
         )
         with _model_load_lock:
