@@ -88,6 +88,11 @@ ENV NLTK_DATA=/.cache/nltk_data
 # Create cache directory
 RUN mkdir -p /.cache && chmod 777 /.cache
 
+# Default the Hugging Face cache into /.cache so pyannote and other hub
+# models land in the mounted cache volume even when the deployment does not
+# forward HF_HOME (e.g. minimal compose snippets). Compose still overrides.
+ENV HF_HOME=/.cache
+
 # Copy application code
 COPY app /workspace/app
 
