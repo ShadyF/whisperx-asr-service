@@ -32,7 +32,7 @@ A simple ASR API service powered by WhisperX for transcription with speaker diar
 ## Limitations
 
 - **Not production-grade**: Basic error handling, no authentication
-- **GPU required**: Needs NVIDIA GPU with 14GB+ VRAM for large models
+- **GPU required**: Needs an NVIDIA GPU; ~5GB VRAM covers the large models
 - **File size limits**: Large audio files (>1GB) can cause out-of-memory errors
 - **VRAM usage**: Memory consumption increases with file size and diarization
 - **Alpha software**: Expect bugs and breaking changes
@@ -58,15 +58,17 @@ GPU memory requirements vary by model size:
 
 | Whisper Model | VRAM Required (with diarization) | Suitable GPUs |
 |---------------|----------------------------------|---------------|
-| tiny, base | ~4-5GB | RTX 3060 8GB, RTX 2060, GTX 1660 Ti |
-| small | ~6GB | RTX 3060, RTX 2070, RTX 2080 |
-| medium | ~10GB | RTX 3080, RTX 3060 12GB, RTX 2080 Ti |
-| large-v2, large-v3 | ~14GB | **RTX 3090**, RTX 4090, A6000, A100 |
+| tiny, base | ~1GB | Any CUDA GPU with 2GB+ |
+| small | ~1.5GB | GTX 1660, RTX 2060, or better |
+| medium, distil-large-v3.5, large-v3-turbo | ~3GB | RTX 2070, RTX 3060, or better |
+| large-v2, large-v3 | ~5GB | RTX 3060 8GB, RTX 2080, **RTX 3090**, or better |
 
-*Note: Measured with preloaded model + alignment + pyannote community-1 diarization on RTX 3090*
+*Note: Measured on an RTX 3090 (float16, batch 16) running transcription +
+alignment + pyannote community-1 diarization. Leave headroom above these
+figures for concurrent requests and larger batches.*
 
 **Minimum Configuration (small/medium models):**
-- GPU: NVIDIA RTX 3060 (12GB VRAM) or better
+- GPU: NVIDIA GPU with 6GB VRAM (e.g. RTX 2060) or better
 - CPU: 8+ cores
 - RAM: 16GB
 - Storage: 50GB SSD
@@ -514,6 +516,19 @@ MODEL_EVICTION_INTERVAL_SECONDS=60  # Sweep frequency (floor of 30 seconds)
 # DIARIZE_MIN_DURATION_OFF=0.2       # default 0.0; raise = reduce over-segmentation
 # DIARIZE_PARAM_OVERRIDES={"clustering": {"Fb": 1.0}}  # JSON escape hatch (Fa/Fb)
 # DIARIZE_FILL_NEAREST=false         # true = tag orphan segments with nearest speaker
+
+# Rebuild segments at speaker-change boundaries after diarization, so rapid
+# turns are not merged into one speaker's segment. Always on for the qwen3
+# backend; opt-in here for the whisper backend (changes segment shape
+# compared to previous releases).
+# RESEGMENT_BY_SPEAKER=true
+
+# Experimental Qwen3-ASR backend (see "Qwen3-ASR Backend" below).
+# ASR_BACKEND=qwen3
+# QWEN3_ASR_MODEL=Qwen/Qwen3-ASR-1.7B-hf
+# QWEN3_ALIGNER_MODEL=Qwen/Qwen3-ForcedAligner-0.6B-hf
+# QWEN3_CHUNK_SECONDS=90
+# QWEN3_DEFAULT_CONTEXT=            # standing vocabulary/context biasing text
 ```
 
 ### Serve Mode
@@ -663,20 +678,74 @@ docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml up -d
 
 Available Whisper models (speed vs accuracy tradeoff):
 
-| Model | Parameters | VRAM (model only) | VRAM (full pipeline*) | Speed | Quality |
-|-------|------------|-------------------|----------------------|-------|---------|
-| `tiny` | 39M | ~1GB | ~4GB | Fastest | Lowest |
-| `base` | 74M | ~1GB | ~5GB | Very Fast | Low |
-| `small` | 244M | ~2GB | ~6GB | Fast | Medium |
-| `medium` | 769M | ~5GB | ~10GB | Moderate | Good |
-| `large-v2` | 1550M | ~10GB | ~14GB | Slow | Excellent |
-| `large-v3` | 1550M | ~10GB | ~14GB | Slow | Best |
+| Model | Parameters | VRAM (loaded) | VRAM (full pipeline*) | Speed | Quality |
+|-------|------------|---------------|----------------------|-------|---------|
+| `tiny` | 39M | 0.5GB | 1.0GB | Fastest | Lowest |
+| `base` | 74M | 0.6GB | 1.1GB | Very Fast | Low |
+| `small` | 244M | 0.9GB | 1.5GB | Fast | Medium |
+| `medium` | 769M | 2.2GB | 2.8GB | Moderate | Good |
+| `distil-large-v3.5` | 756M | 2.2GB | 2.8GB | Fast | Near-best |
+| `large-v3-turbo` | 809M | 2.3GB | 2.9GB | Fast | Near-best |
+| `large-v2` | 1550M | 3.9GB | 4.6GB | Slow | Excellent |
+| `large-v3` | 1550M | 3.9GB | 4.6GB | Slow | Best |
 
-*Full pipeline = Whisper model + alignment model + pyannote speaker diarization (measured on RTX 3090)
+*Measured on an RTX 3090 (float16, `BATCH_SIZE=16`, 12-minute file), running
+transcription, alignment, and pyannote diarization. Peak VRAM occurs during
+transcription; alignment and diarization add little on top. Actual peaks vary
+somewhat with audio content and batch size.
 
 **Recommendation:**
-- Use `large-v3` for best quality (requires 16GB+ VRAM)
-- Use `small` or `medium` for speed/resource constraints (8-12GB VRAM)
+- Use `large-v3` for best quality (fits comfortably in 6GB+ VRAM)
+- Use `distil-large-v3.5` or `large-v3-turbo` for near-large quality at
+  about half the VRAM and higher speed
+- Use `small` or `medium` for tight VRAM budgets (2-3GB)
+
+### Qwen3-ASR Backend (Experimental)
+
+Setting `ASR_BACKEND=qwen3` replaces the transcription and alignment stages
+with Qwen3-ASR (`Qwen/Qwen3-ASR-1.7B-hf`) and the Qwen3 forced aligner
+(`Qwen/Qwen3-ForcedAligner-0.6B-hf`), loaded through stock transformers.
+Diarization is unchanged.
+
+Why use it:
+
+- The forced aligner is a single model covering zh, en, yue, fr, de, it,
+  ja, ko, pt, ru, and es. Code-switched audio (for example Chinese and
+  English in one recording) is transcribed and word-aligned in one pass,
+  which the per-language Wav2Vec2 alignment stage cannot do.
+- `hotwords` and `initial_prompt` become free-text context biasing, which
+  corrects domain terms more reliably than token-level hotwords.
+
+Why not:
+
+- Roughly 10x slower than faster-whisper (about 12x realtime vs 116x on an
+  RTX 3090). The full pipeline uses about 6 GB VRAM with the default 1.7B
+  model (vs 4.6 GB for whisper large-v3), or about 3.6 GB with
+  `QWEN3_ASR_MODEL=Qwen/Qwen3-ASR-0.6B-hf`.
+- The requested Whisper model name is ignored and `task=translate` falls
+  back to the whisper backend.
+- Audio is processed in 90-second chunks (`QWEN3_CHUNK_SECONDS`); words
+  spanning a chunk boundary may be split.
+
+Weights (about 4.6 GB total) download to the cache volume on first use, the
+same as every other model. Nothing downloads unless the backend is enabled.
+
+```bash
+ASR_BACKEND=qwen3
+# Optional overrides (defaults shown):
+# QWEN3_ASR_MODEL=Qwen/Qwen3-ASR-1.7B-hf
+# QWEN3_ALIGNER_MODEL=Qwen/Qwen3-ForcedAligner-0.6B-hf
+# QWEN3_CHUNK_SECONDS=90
+# QWEN3_DEFAULT_CONTEXT=          # standing vocabulary/context biasing text
+```
+
+**Code-switched audio requires a per-request `language`.** Passing any one
+of the mixed languages makes the backend force verbatim transcription (the
+other languages are still transcribed in their own script). Without a
+language, the model picks the dominant language per chunk and translates
+the rest into it; context hints do not prevent this. Speaker segments are
+always rebuilt at speaker-change boundaries on this backend (see
+`RESEGMENT_BY_SPEAKER` below for the whisper backend).
 
 ## Running the Service
 

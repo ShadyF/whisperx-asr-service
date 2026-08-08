@@ -58,6 +58,11 @@ services:
       - DIARIZE_MIN_DURATION_OFF=${DIARIZE_MIN_DURATION_OFF:-}
       - DIARIZE_PARAM_OVERRIDES=${DIARIZE_PARAM_OVERRIDES:-}
       - DIARIZE_FILL_NEAREST=${DIARIZE_FILL_NEAREST:-false}
+      # Optional Qwen3-ASR backend (see README)
+      - ASR_BACKEND=${ASR_BACKEND:-}
+      - QWEN3_ASR_MODEL=${QWEN3_ASR_MODEL:-}
+      - QWEN3_ALIGNER_MODEL=${QWEN3_ALIGNER_MODEL:-}
+      - RESEGMENT_BY_SPEAKER=${RESEGMENT_BY_SPEAKER:-}
 
     volumes:
       # Persistent cache for models (recommended)

@@ -68,6 +68,10 @@ RUN pip3 install --no-cache-dir \
     torchaudio==${TORCH_VERSION} \
     --index-url ${TORCH_INDEX_URL}
 
+# Upgrade transformers for the optional Qwen3-ASR backend (ASR_BACKEND=qwen3).
+# The qwen3_asr architecture is natively supported from transformers 5.13.
+RUN pip3 install --no-cache-dir "transformers>=5.13,<6"
+
 # Install API dependencies
 RUN pip3 install --no-cache-dir \
     fastapi==0.104.1 \
