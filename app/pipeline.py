@@ -42,6 +42,48 @@ HF_TOKEN = os.getenv("HF_TOKEN", None)
 CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
 DEFAULT_MODEL = os.getenv("PRELOAD_MODEL", "large-v3")
 
+
+def _read_vad_chunk_size() -> int:
+    """Read and validate the process-wide ASR VAD chunk size."""
+    value = os.getenv("VAD_CHUNK_SIZE", "30")
+
+    # Reject malformed startup configuration before models can be constructed.
+    try:
+        chunk_size = int(value)
+    except ValueError as error:
+        raise ValueError("VAD_CHUNK_SIZE must be an integer.") from error
+
+    # Keep chunks in the supported range so deployments fail clearly at startup.
+    if not 5 <= chunk_size <= 60:
+        raise ValueError("VAD_CHUNK_SIZE must be between 5 and 60.")
+    return chunk_size
+
+
+def _read_vad_threshold(name: str, default: str) -> float:
+    """Read and validate one process-wide ASR VAD threshold."""
+    value = os.getenv(name, default)
+
+    # Reject malformed startup configuration before models can be constructed.
+    try:
+        threshold = float(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a float.") from error
+
+    # Reject non-finite values because they cannot satisfy a probability bound.
+    if not math.isfinite(threshold):
+        raise ValueError(f"{name} must be a finite float.")
+    return threshold
+
+
+# Read these once so every cached Whisper model in this process shares VAD settings.
+VAD_CHUNK_SIZE = _read_vad_chunk_size()
+VAD_ONSET = _read_vad_threshold("VAD_ONSET", ".500")
+VAD_OFFSET = _read_vad_threshold("VAD_OFFSET", ".363")
+
+# Validate the related thresholds together because offset must not exceed onset.
+if not 0 <= VAD_OFFSET <= VAD_ONSET <= 1:
+    raise ValueError("VAD thresholds must satisfy 0 <= VAD_OFFSET <= VAD_ONSET <= 1.")
+
 # Idle model eviction. Set MODEL_KEEP_ALIVE_SECONDS > 0 to unload Whisper,
 # alignment and diarization models that have not been used in that many
 # seconds. Floor of 30s on the sweep interval to avoid pegging a thread on
@@ -202,12 +244,24 @@ def load_whisper_model(model_name: str):
     if model_name not in _whisper_models:
         with _model_load_lock:
             if model_name not in _whisper_models:
-                logger.info(f"Loading WhisperX model: {model_name}")
+                # Record immutable ASR VAD settings only when this cache entry is built.
+                logger.info("Loading WhisperX model: %s", model_name)
+                logger.info(
+                    "ASR VAD configuration: chunk_size=%d onset=%.3f offset=%.3f",
+                    VAD_CHUNK_SIZE,
+                    VAD_ONSET,
+                    VAD_OFFSET,
+                )
                 model = whisperx.load_model(
                     model_name,
                     device=DEVICE,
                     compute_type=COMPUTE_TYPE,
                     download_root=CACHE_DIR,
+                    vad_options={
+                        "chunk_size": VAD_CHUNK_SIZE,
+                        "vad_onset": VAD_ONSET,
+                        "vad_offset": VAD_OFFSET,
+                    },
                 )
                 _whisper_models[model_name] = model
                 logger.info(f"Model {model_name} loaded successfully")

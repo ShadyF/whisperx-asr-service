@@ -345,6 +345,26 @@ curl -X POST http://localhost:9000/asr \
 
 ### Advanced Speaker Diarization Features
 
+#### ASR VAD and Speaker Diarization Are Separate
+
+`VAD_CHUNK_SIZE`, `VAD_ONSET`, and `VAD_OFFSET` configure speech-activity
+detection used while WhisperX constructs transcription segments. They are
+process-wide settings, read when the service starts and applied when each
+cached Whisper model is created; requests cannot override them. The initial
+Compose values are `20`, `.500`, and `.363` respectively (the application
+defaults are `30`, `.500`, and `.363` when these variables are absent).
+
+Smaller chunks may reduce decoder repetition but lose some context and add
+processing overhead. Increasing `VAD_OFFSET` can end speech regions sooner,
+but may clip quiet final words. Higher onset thresholds reject more noise but
+can miss quiet speech. `VAD_CHUNK_SIZE`
+must be an integer from 5 through 60, and thresholds must satisfy
+`0 <= VAD_OFFSET <= VAD_ONSET <= 1`; invalid values prevent startup.
+
+These controls do **not** tune speaker labels or turn assignment. Those are
+handled by Pyannote diarization. In particular, `DIARIZE_PARAM_OVERRIDES`
+only deep-merges Pyannote parameters and is isolated from ASR VAD.
+
 #### Exact Speaker Count
 
 When you know the exact number of speakers, use `num_speakers` for more accurate diarization:
@@ -525,12 +545,24 @@ MAX_FILE_SIZE_MB=1000    # Default 1GB, adjust lower for GPUs with <16GB VRAM
 MODEL_KEEP_ALIVE_SECONDS=0          # 0 disables eviction; e.g. 3600 = 1 hour
 MODEL_EVICTION_INTERVAL_SECONDS=60  # Sweep frequency (floor of 30 seconds)
 
+# ASR speech-activity detection. These settings are read at process startup
+# and passed when each cached Whisper model is built; they are not per-request
+# controls and do not affect Pyannote speaker diarization.
+# Smaller chunks add overhead but can follow boundaries more closely. Higher
+# thresholds reject more noise but can miss quiet speech. Values must satisfy
+# 5 <= VAD_CHUNK_SIZE <= 60 and 0 <= VAD_OFFSET <= VAD_ONSET <= 1.
+VAD_CHUNK_SIZE=20
+VAD_ONSET=.500
+VAD_OFFSET=.363
+
 # Diarization hyperparameter tuning (optional, unset = model defaults).
 # See "Tuning Diarization Hyperparameters" above for details.
 # DIARIZE_CLUSTERING_THRESHOLD=0.5   # default 0.6; lower = split merged voices
 # DIARIZE_MIN_DURATION_OFF=0.2       # default 0.0; raise = reduce over-segmentation
 # DIARIZE_PARAM_OVERRIDES={"clustering": {"Fb": 1.0}}  # JSON escape hatch (Fa/Fb)
 # DIARIZE_FILL_NEAREST=false         # true = tag orphan segments with nearest speaker
+# DIARIZE_PARAM_OVERRIDES changes only Pyannote diarization parameters. It
+# does not affect the separate ASR VAD settings above.
 
 # Rebuild segments at speaker-change boundaries after diarization, so rapid
 # turns are not merged into one speaker's segment. Always on for the qwen3
