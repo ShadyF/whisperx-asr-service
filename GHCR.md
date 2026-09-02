@@ -1,4 +1,4 @@
-# WhisperX ASR API Service
+# GitHub Container Registry Image Reference
 
 ASR API powered by WhisperX with speaker diarization, word-level timestamps, and OpenAI-compatible endpoints. Built for self-hosters running [Speakr](https://github.com/murtaza-nasir/speakr) or similar applications.
 
@@ -19,8 +19,8 @@ If your GPU is an RTX 50xx, pull `:blackwell`. Every other NVIDIA card from 10xx
 
 ```bash
 # Pick the tag that matches your GPU.
-IMAGE=learnedmachine/whisperx-asr-service:latest        # 10xx, 20xx, 30xx, 40xx, A-series, H-series
-# IMAGE=learnedmachine/whisperx-asr-service:blackwell   # RTX 50xx
+IMAGE=ghcr.io/shadyf/whisperx-asr-service:latest        # 10xx, 20xx, 30xx, 40xx, A-series, H-series
+# IMAGE=ghcr.io/shadyf/whisperx-asr-service:blackwell   # RTX 50xx
 
 docker run -d \
   --name whisperx-asr-api \

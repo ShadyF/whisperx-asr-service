@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/releases/tag/v0.3.2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Docker Build](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml)
-[![Docker Pulls](https://img.shields.io/docker/pulls/learnedmachine/whisperx-asr-service)](https://hub.docker.com/r/learnedmachine/whisperx-asr-service)
+[![GHCR](https://img.shields.io/badge/GHCR-shadyf%2Fwhisperx--asr--service-blue?logo=github)](https://github.com/shadyf/whisperx-asr-service/pkgs/container/whisperx-asr-service)
 [![GPU Required](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76B900.svg)](https://developer.nvidia.com/cuda-zone)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/murtaza-nasir/whisperx-asr-service)
 
@@ -15,8 +15,8 @@ A simple ASR API service powered by WhisperX for transcription with speaker diar
 >
 > | Device | Pull this tag |
 > |----------|---------------|
-> | **RTX 50xx GPU (Blackwell)** | `learnedmachine/whisperx-asr-service:blackwell` (PyTorch 2.8.0 / cu128) |
-> | CPU or any other NVIDIA GPU (10xx, 20xx, 30xx, 40xx, A-series, H-series) | `learnedmachine/whisperx-asr-service:latest` (PyTorch 2.7.1 / cu126) |
+> | **RTX 50xx GPU (Blackwell)** | `ghcr.io/shadyf/whisperx-asr-service:blackwell` (PyTorch 2.8.0 / cu128) |
+> | CPU or any other NVIDIA GPU (10xx, 20xx, 30xx, 40xx, A-series, H-series) | `ghcr.io/shadyf/whisperx-asr-service:latest` (PyTorch 2.7.1 / cu126) |
 >
 > See [Image Variants](#image-variants) for details.
 
@@ -189,8 +189,8 @@ users should swap to `:blackwell` (PyTorch 2.8.0 / cu128). See
 
 ```bash
 # Pick the right tag for your GPU:
-IMAGE=learnedmachine/whisperx-asr-service:latest      # 10xx-40xx, A/H-series
-# IMAGE=learnedmachine/whisperx-asr-service:blackwell # RTX 50xx only
+IMAGE=ghcr.io/shadyf/whisperx-asr-service:latest      # 10xx-40xx, A/H-series
+# IMAGE=ghcr.io/shadyf/whisperx-asr-service:blackwell # RTX 50xx only
 
 docker run -d \
   --name whisperx-asr-api \
@@ -415,7 +415,7 @@ docker run --rm --gpus '"device=0"' \
   -v whisperx-cache:/.cache \
   -v "$PWD/tests:/work/tests:ro" -v "$PWD/testfiles:/work/testfiles:ro" \
   -e HF_TOKEN="$HF_TOKEN" -e HF_HOME=/.cache -e DEVICE=cuda \
-  learnedmachine/whisperx-asr-service:latest \
+  ghcr.io/shadyf/whisperx-asr-service:latest \
   python3 /work/tests/diarize_sweep.py /work/testfiles/your_audio.mp3 --min-speakers 2
 ```
 
@@ -989,7 +989,7 @@ If the machine that runs the service has no internet at all, populate the cache 
    docker run -d --gpus all -p 9000:9000 \
      -e HF_HUB_OFFLINE=1 \
      -v /srv/whisperx-cache:/.cache \
-     learnedmachine/whisperx-asr-service:latest
+     ghcr.io/shadyf/whisperx-asr-service:latest
    ```
    On RTX 50xx / Blackwell cards use the `:0.3.2-blackwell` image and keep `COMPUTE_TYPE=float16` (the CTranslate2 INT8 path is not supported on Blackwell).
 

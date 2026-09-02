@@ -132,8 +132,8 @@ but ship different PyTorch wheels:
 
 | Tag | PyTorch | Supported GPUs |
 |-----|---------|----------------|
-| `:latest` (`learnedmachine/whisperx-asr-service:latest`) | 2.7.1 / cu126 | Pascal (10xx) through Hopper |
-| `:blackwell` (`learnedmachine/whisperx-asr-service:blackwell`) | 2.8.0 / cu128 | Blackwell (RTX 50xx) |
+| `:latest` (`ghcr.io/shadyf/whisperx-asr-service:latest`) | 2.7.1 / cu126 | Pascal (10xx) through Hopper |
+| `:blackwell` (`ghcr.io/shadyf/whisperx-asr-service:blackwell`) | 2.8.0 / cu128 | Blackwell (RTX 50xx) |
 
 If you have an RTX 50xx, switch the `image:` line in `docker-compose.yml` to
 the `-blackwell` tag. Everyone else can stick with `:latest`. Pascal users

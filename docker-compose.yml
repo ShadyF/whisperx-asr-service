@@ -1,7 +1,7 @@
 services:
   whisperx-asr:
-    # Use prebuilt image from Docker Hub
-    image: learnedmachine/whisperx-asr-service:latest
+    # Use prebuilt image from GitHub Container Registry
+    image: ghcr.io/shadyf/whisperx-asr-service:latest
 
     container_name: whisperx-asr-api
     restart: unless-stopped

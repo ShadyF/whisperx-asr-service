@@ -5,8 +5,12 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+  packages: write
+
 env:
-  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/whisperx-asr-service
+  DOCKER_IMAGE: ghcr.io/shadyf/whisperx-asr-service
 
 jobs:
   build-default:
@@ -40,11 +44,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
@@ -70,15 +75,6 @@ jobs:
           cache-from: type=gha,scope=default
           cache-to: type=gha,mode=max,scope=default
           platforms: linux/amd64
-
-      - name: Update Docker Hub description
-        uses: peter-evans/dockerhub-description@v5
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.DOCKER_IMAGE }}
-          short-description: "WhisperX ASR API Service - Speech Recognition with Speaker Diarization"
-          readme-filepath: ./DOCKERHUB.md
 
   build-blackwell:
     runs-on: ubuntu-latest
@@ -109,11 +105,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata (Blackwell)
         id: meta-blackwell
