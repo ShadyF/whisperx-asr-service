@@ -24,7 +24,9 @@ warnings.filterwarnings("ignore", message=".*torchcodec.*")
 import numpy as np
 import torch
 import whisperx
+from whisperx.audio import SAMPLE_RATE
 from whisperx.diarize import DiarizationPipeline
+from whisperx.vads import Vad, Pyannote
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,11 @@ ALIGN_DEVICE = os.getenv("ALIGN_DEVICE", "").strip().lower() or DEVICE
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
 DEFAULT_MODEL = os.getenv("PRELOAD_MODEL", "large-v3")
+
+# Select the process-wide Whisper decoder before any model is loaded.
+WHISPER_DECODE_MODE = os.getenv("WHISPER_DECODE_MODE", "batched").strip().lower()
+if WHISPER_DECODE_MODE not in ("batched", "native"):
+    raise ValueError("WHISPER_DECODE_MODE must be either 'batched' or 'native'.")
 
 
 def _read_vad_chunk_size() -> int:
@@ -210,6 +217,7 @@ def resolve_model_name(model: str) -> str:
 
 
 _model_load_lock = threading.Lock()
+_transcription_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Model caches
@@ -252,6 +260,7 @@ def load_whisper_model(model_name: str):
                     VAD_ONSET,
                     VAD_OFFSET,
                 )
+                logger.info("Whisper decode mode: %s", WHISPER_DECODE_MODE)
                 model = whisperx.load_model(
                     model_name,
                     device=DEVICE,
@@ -340,9 +349,15 @@ def _eviction_loop():
         if MODEL_KEEP_ALIVE_SECONDS <= 0:
             continue
         now = time.time()
-        evicted_any = _evict_from_cache(
-            _whisper_models, _whisper_models_last_used, "model", now, with_metrics=True
-        )
+        # Keep cached Whisper wrappers alive while a transcription owns one.
+        with _transcription_lock:
+            evicted_any = _evict_from_cache(
+                _whisper_models,
+                _whisper_models_last_used,
+                "model",
+                now,
+                with_metrics=True,
+            )
         evicted_any |= _evict_from_cache(
             _align_models, _align_models_last_used, "alignment model for language", now
         )
@@ -506,6 +521,199 @@ def load_diarize_pipeline() -> DiarizationPipeline:
 # ---------------------------------------------------------------------------
 # Stage 1 -- Transcription
 # ---------------------------------------------------------------------------
+class NativeDecodeError(RuntimeError):
+    """Expose native chunk failures without dependency-provided text."""
+
+
+def _native_effective_language(
+    whisper_model: Any, audio: np.ndarray, language: Optional[str]
+) -> str:
+    """Resolve one language for all native VAD chunks in a recording."""
+    if language is not None:
+        return language
+
+    # Prefer the wrapper's configured language so token handling stays stable.
+    preset_language = getattr(whisper_model, "preset_language", None)
+    if preset_language:
+        return preset_language
+
+    # Reuse the tokenizer language selected when the wrapper was created.
+    tokenizer_language = getattr(
+        getattr(whisper_model, "tokenizer", None), "language_code", None
+    )
+    if tokenizer_language:
+        return tokenizer_language
+
+    # Detect once on the full recording so every chunk uses the same language.
+    return whisper_model.detect_language(audio)
+
+
+def _native_vad_chunks(whisper_model: Any, audio: np.ndarray) -> list:
+    """Build native decode chunks with WhisperX's existing VAD flow."""
+    vad_model = whisper_model.vad_model
+
+    # Keep the installed wrapper's Silero and Pyannote preprocessing paths intact.
+    if issubclass(type(vad_model), Vad):
+        waveform = vad_model.preprocess_audio(audio)
+        vad_output = vad_model({"waveform": waveform, "sample_rate": SAMPLE_RATE})
+        return vad_model.merge_chunks(
+            vad_output, VAD_CHUNK_SIZE, onset=VAD_ONSET, offset=VAD_OFFSET
+        )
+
+    # Use the wrapper's existing Pyannote preprocessing and merge path.
+    waveform = Pyannote.preprocess_audio(audio)
+    vad_output = vad_model({"waveform": waveform, "sample_rate": SAMPLE_RATE})
+    return Pyannote.merge_chunks(
+        vad_output, VAD_CHUNK_SIZE, onset=VAD_ONSET, offset=VAD_OFFSET
+    )
+
+
+def _native_chunk_bounds(chunk: dict, sample_count: int) -> Tuple[int, int]:
+    """Validate a VAD span and convert it to a safe half-open sample range."""
+    # Parse the VAD values before they are used as sample positions.
+    try:
+        start = float(chunk["start"])
+        end = float(chunk["end"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "Native VAD chunk must contain numeric start and end values."
+        ) from error
+
+    # Reject invalid VAD output before it can silently hide speech.
+    if not math.isfinite(start) or not math.isfinite(end) or end < start:
+        raise ValueError("Native VAD chunk has a non-finite or reversed span.")
+
+    # Clamp the outer span to the recording and reject empty slices.
+    start_index = min(max(math.floor(start * SAMPLE_RATE), 0), sample_count)
+    end_index = min(max(math.ceil(end * SAMPLE_RATE), 0), sample_count)
+    if end_index <= start_index:
+        raise ValueError("Native VAD chunk collapses after sample clamping.")
+    return start_index, end_index
+
+
+def _native_safe_chunk_bounds(chunk: dict) -> Tuple[str, str]:
+    """Return log-safe chunk bounds without exposing request data."""
+    # Parse only numeric VAD values for the safe error fields.
+    try:
+        start = float(chunk["start"])
+        end = float(chunk["end"])
+    except (KeyError, TypeError, ValueError):
+        return "unknown", "unknown"
+
+    # Reject non-finite values from the log fields as well as decoding.
+    if not math.isfinite(start) or not math.isfinite(end):
+        return "unknown", "unknown"
+    return f"{start:.3f}", f"{end:.3f}"
+
+
+def _native_transcribe(
+    whisper_model: Any,
+    audio: np.ndarray,
+    language: Optional[str],
+    task: str,
+    initial_prompt: Optional[str],
+    hotwords: Optional[str],
+) -> dict:
+    """Decode each merged WhisperX VAD chunk through the cached native model."""
+    from app import metrics as prom_metrics
+
+    # Resolve VAD and language while the shared wrapper cannot be used elsewhere.
+    effective_language = _native_effective_language(whisper_model, audio, language)
+    chunks = _native_vad_chunks(whisper_model, audio)
+
+    # Track recording-wide timestamps while each chunk is decoded.
+    sample_count = len(audio)
+    segments = []
+    previous_end = 0.0
+
+    # Decode each outer VAD span serially and preserve its internal silence.
+    for chunk_index, chunk in enumerate(chunks):
+        # Prepare safe bounds before the per-chunk failure boundary begins.
+        safe_start, safe_end = _native_safe_chunk_bounds(chunk)
+
+        # Count every merged chunk before validating or invoking the decoder.
+        prom_metrics.WHISPERX_DECODE_CHUNKS_TOTAL.labels(mode="native").inc()
+        try:
+            # Slice the full outer VAD span without removing internal silence.
+            start_index, end_index = _native_chunk_bounds(chunk, sample_count)
+            chunk_start = start_index / SAMPLE_RATE
+            chunk_end = end_index / SAMPLE_RATE
+            chunk_audio = audio[start_index:end_index]
+
+            # Keep the prescribed native decoder options identical for every chunk.
+            decode_options = {
+                "language": effective_language,
+                "task": task,
+                "hotwords": hotwords,
+                "initial_prompt": initial_prompt if chunk_index == 0 else None,
+                "condition_on_previous_text": False,
+                "compression_ratio_threshold": 2.4,
+                "log_prob_threshold": -1.0,
+                "no_speech_threshold": 0.6,
+                "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+                "beam_size": 5,
+                "vad_filter": False,
+                "word_timestamps": False,
+            }
+
+            # Exhaust the lazy generator before another shared-model decode begins.
+            native_segments, _ = whisper_model.model.transcribe(chunk_audio, **decode_options)
+            native_segments = list(native_segments)
+
+            # Convert chunk-relative native segments into safe recording timestamps.
+            for native_segment in native_segments:
+                text = native_segment.text
+                if not text or not text.strip():
+                    continue
+                try:
+                    local_start = float(native_segment.start)
+                    local_end = float(native_segment.end)
+                except (TypeError, ValueError) as error:
+                    raise ValueError(
+                        "Native Whisper segment has invalid timestamps."
+                    ) from error
+                if (
+                    not math.isfinite(local_start)
+                    or not math.isfinite(local_end)
+                    or local_end < local_start
+                ):
+                    raise ValueError(
+                        "Native Whisper segment has a non-finite or reversed span."
+                    )
+
+                # Clamp local timestamps to this outer chunk and prior output.
+                absolute_start = min(
+                    max(chunk_start + local_start, chunk_start), chunk_end
+                )
+                absolute_end = min(
+                    max(chunk_start + local_end, chunk_start), chunk_end
+                )
+                absolute_start = max(absolute_start, previous_end)
+                if absolute_end <= absolute_start:
+                    raise ValueError(
+                        "Native Whisper speech segment collapses after timestamp clamping."
+                    )
+                segments.append(
+                    {"start": absolute_start, "end": absolute_end, "text": text}
+                )
+                previous_end = absolute_end
+        except Exception as error:
+            # Emit and surface only safe fields when native processing fails.
+            prom_metrics.WHISPERX_DECODE_FAILURES_TOTAL.labels(mode="native").inc()
+            logger.error(
+                "Native Whisper decode failed for chunk start=%s end=%s exception=%s",
+                safe_start,
+                safe_end,
+                type(error).__name__,
+            )
+            raise NativeDecodeError(
+                "Native decode failed for chunk "
+                f"start={safe_start} end={safe_end} exception={type(error).__name__}"
+            ) from None
+
+    return {"segments": segments, "language": effective_language}
+
+
 def transcribe(
     audio: np.ndarray,
     model_name: str = DEFAULT_MODEL,
@@ -535,29 +743,41 @@ def transcribe(
             "using whisper backend for this request"
         )
 
-    whisper_model = load_whisper_model(model_name)
+    # Serialize loading and use so eviction cannot remove a live cached wrapper.
+    with _transcription_lock:
+        whisper_model = load_whisper_model(model_name)
+        try:
+            if WHISPER_DECODE_MODE == "native":
+                logger.info("Starting native transcription...")
+                result = _native_transcribe(
+                    whisper_model, audio, language, task, initial_prompt, hotwords
+                )
+            else:
+                # Preserve option values that may have been configured when the wrapper loaded.
+                original_hotwords = whisper_model.options.hotwords
+                original_initial_prompt = whisper_model.options.initial_prompt
+                if hotwords is not None:
+                    whisper_model.options.hotwords = hotwords
+                if initial_prompt is not None:
+                    whisper_model.options.initial_prompt = initial_prompt
 
-    # Set per-request options on the model's transcription options.
-    # The model is cached/shared, so we must reset after transcription.
-    if hotwords is not None:
-        whisper_model.options.hotwords = hotwords
-    if initial_prompt is not None:
-        whisper_model.options.initial_prompt = initial_prompt
+                transcribe_options: Dict[str, Any] = {
+                    "batch_size": BATCH_SIZE,
+                    "language": language,
+                    "task": task,
+                }
 
-    transcribe_options: Dict[str, Any] = {
-        "batch_size": BATCH_SIZE,
-        "language": language,
-        "task": task,
-    }
-
-    logger.info("Starting transcription...")
-    try:
-        result = whisper_model.transcribe(audio, **transcribe_options)
-    finally:
-        if hotwords is not None:
-            whisper_model.options.hotwords = None
-        if initial_prompt is not None:
-            whisper_model.options.initial_prompt = None
+                logger.info("Starting transcription...")
+                try:
+                    result = whisper_model.transcribe(audio, **transcribe_options)
+                finally:
+                    whisper_model.options.hotwords = original_hotwords
+                    whisper_model.options.initial_prompt = original_initial_prompt
+        finally:
+            # Refresh only the selected cache entry if it still owns this wrapper.
+            with _model_load_lock:
+                if _whisper_models.get(model_name) is whisper_model:
+                    _whisper_models_last_used[model_name] = time.time()
 
     detected_language = result.get("language", language or "en")
     logger.info(f"Transcription complete. Detected language: {detected_language}")

@@ -345,6 +345,33 @@ curl -X POST http://localhost:9000/asr \
 
 ### Advanced Speaker Diarization Features
 
+#### Native Faster-Whisper Decode Per VAD Chunk
+
+`WHISPER_DECODE_MODE` is a process-wide startup setting. The default,
+`batched`, preserves the existing WhisperX batched transcription path. Set
+`WHISPER_DECODE_MODE=native` to retain the existing Pyannote ASR VAD and decode
+each merged VAD chunk serially through the already-loaded faster-whisper model;
+it does not load a second Whisper model. `BATCH_SIZE` is ignored only in native
+mode. Alignment remains configurable with `ALIGN_DEVICE` (for example `cpu`),
+and speaker diarization behavior is unchanged.
+
+Native mode uses conservative faster-whisper decoder rejection thresholds and
+fallback temperatures to reduce repetition on difficult chunks. It is an
+experiment: start with the existing VAD configuration
+`VAD_CHUNK_SIZE=20`, `VAD_ONSET=.500`, and `VAD_OFFSET=.363` rather than
+changing those thresholds at the same time. Because decoding is serial, use
+`GPU_CONCURRENCY=1`; on constrained cards such as a GTX 1660, `ALIGN_DEVICE=cpu`
+also leaves more GPU memory for decoding.
+
+```yaml
+WHISPER_DECODE_MODE: native
+VAD_CHUNK_SIZE: "20"
+VAD_ONSET: "0.500"
+VAD_OFFSET: "0.363"
+GPU_CONCURRENCY: "1"
+ALIGN_DEVICE: cpu
+```
+
 #### ASR VAD and Speaker Diarization Are Separate
 
 `VAD_CHUNK_SIZE`, `VAD_ONSET`, and `VAD_OFFSET` configure speech-activity
@@ -529,6 +556,11 @@ COMPUTE_TYPE=float16     # float16 (GPU), float32 (CPU), int8 (faster, lower qua
 # Batch size (higher = faster but more memory). Default is device-aware:
 # 16 on cuda, 2 on cpu. Long audio on CPU benefits from BATCH_SIZE=1.
 BATCH_SIZE=16           # 16 for 8GB VRAM, 32+ for high-end GPUs, 1-2 on CPU
+
+# Process-wide decoder mode. batched is the compatible default. native reuses
+# the cached faster-whisper model and existing Pyannote VAD, then decodes VAD
+# chunks serially. BATCH_SIZE is ignored only by native mode.
+WHISPER_DECODE_MODE=batched
 
 # Hugging Face token for diarization
 HF_TOKEN=hf_xxx...

@@ -22,7 +22,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
         # Remove prior imports so each test gets a fresh process-wide configuration.
         self.original_modules = {
             name: sys.modules.pop(name)
-            for name in ("app.pipeline", "numpy", "torch", "whisperx", "whisperx.diarize")
+            for name in ("app.pipeline", "numpy", "torch", "whisperx", "whisperx.audio", "whisperx.diarize", "whisperx.vads")
             if name in sys.modules
         }
 
@@ -34,7 +34,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
     def tearDown(self):
         # Restore imports and environment state for unrelated tests.
         self.env_patcher.stop()
-        for name in ("app.pipeline", "numpy", "torch", "whisperx", "whisperx.diarize"):
+        for name in ("app.pipeline", "numpy", "torch", "whisperx", "whisperx.audio", "whisperx.diarize", "whisperx.vads"):
             sys.modules.pop(name, None)
         sys.modules.update(self.original_modules)
 
@@ -68,11 +68,18 @@ class TestPipelineVadConfiguration(unittest.TestCase):
 
         diarize = types.ModuleType("whisperx.diarize")
         setattr(diarize, "DiarizationPipeline", Mock())
+        audio = types.ModuleType("whisperx.audio")
+        setattr(audio, "SAMPLE_RATE", 16000)
+        vads = types.ModuleType("whisperx.vads")
+        setattr(vads, "Vad", object)
+        setattr(vads, "Pyannote", object)
         sys.modules.update({
             "numpy": numpy,
             "torch": torch,
             "whisperx": whisperx,
+            "whisperx.audio": audio,
             "whisperx.diarize": diarize,
+            "whisperx.vads": vads,
         })
 
     def _load_pipeline(self, **environment):
@@ -106,6 +113,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             "INFO:app.pipeline:ASR VAD configuration: chunk_size=30 onset=0.500 offset=0.363",
             logs.output,
         )
+        self.assertIn("INFO:app.pipeline:Whisper decode mode: batched", logs.output)
 
     def test_custom_vad_environment_is_passed_when_cached_model_is_constructed(self):
         pipeline = self._load_pipeline(

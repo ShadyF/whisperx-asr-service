@@ -49,6 +49,20 @@ VRAM_ALLOCATED_BYTES = Gauge(
     "Currently allocated VRAM (CUDA only; 0 on CPU)",
 )
 SERVICE_INFO = Info("whisperx_service", "Static service identity")
+WHISPERX_DECODE_CHUNKS_TOTAL = Counter(
+    "whisperx_decode_chunks_total",
+    "Native Whisper decode chunk attempts",
+    ["mode"],
+)
+WHISPERX_DECODE_FAILURES_TOTAL = Counter(
+    "whisperx_decode_failures_total",
+    "Native Whisper decode chunk failures",
+    ["mode"],
+)
+
+# Create the fixed native series before its first decode attempt.
+WHISPERX_DECODE_CHUNKS_TOTAL.labels(mode="native")
+WHISPERX_DECODE_FAILURES_TOTAL.labels(mode="native")
 
 
 def refresh_vram():

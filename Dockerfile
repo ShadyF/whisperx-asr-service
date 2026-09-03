@@ -43,10 +43,11 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip && \
         torch==${TORCH_VERSION} \
         torchaudio==${TORCH_VERSION} \
         --index-url ${TORCH_INDEX_URL} && \
-    pip3 install --no-cache-dir git+https://github.com/sealambda/whisperX.git@feat/pyannote-audio-4 && \
+    pip3 install --no-cache-dir git+https://github.com/sealambda/whisperX.git@741f8defa185c41a0075876d6e3a6dbeaf342acf && \
     sed -i 's/use_token=/token=/g' \
         /usr/local/lib/python3.10/dist-packages/whisperx/diarize.py && \
     pip3 install --no-cache-dir --upgrade pyannote.audio && \
+    pip3 install --no-cache-dir faster-whisper==1.2.1 && \
     pip3 install --no-cache-dir \
         torch==${TORCH_VERSION} \
         torchaudio==${TORCH_VERSION} \
