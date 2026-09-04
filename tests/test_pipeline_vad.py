@@ -122,8 +122,8 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             logs.output,
         )
         self.assertIn(
-            "INFO:app.pipeline:Whisper decoder configuration: mode=batched no_speech=0.600 "
-            "compression_ratio=2.400 log_prob=-1.000",
+            "INFO:app.pipeline:Whisper decoder configuration: mode=batched no_speech=0.6 "
+            "compression_ratio=2.4 log_prob=-1.0",
             logs.output,
         )
 
@@ -162,8 +162,8 @@ class TestPipelineVadConfiguration(unittest.TestCase):
         self.assertEqual(
             [message for message in logs.output if "Whisper decoder configuration" in message],
             [
-                "INFO:app.pipeline:Whisper decoder configuration: mode=batched no_speech=0.700 "
-                "compression_ratio=3.100 log_prob=-0.400"
+                "INFO:app.pipeline:Whisper decoder configuration: mode=batched no_speech=0.7 "
+                "compression_ratio=3.1 log_prob=-0.4"
             ],
         )
 
@@ -183,9 +183,25 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             ],
             [
                 "INFO:app.pipeline:Whisper decoder configuration: mode=batched "
-                "no_speech=0.600 compression_ratio=2.400 log_prob=-1.000"
+                "no_speech=0.6 compression_ratio=2.4 log_prob=-1.0"
             ],
         )
+
+    def test_decoder_configuration_log_preserves_small_float_precision(self):
+        pipeline = self._load_pipeline(COMPRESSION_RATIO_THRESHOLD="0.0001")
+
+        # Capture the startup summary for the configured small threshold.
+        with self.assertLogs("app.pipeline", "INFO") as logs:
+            pipeline.log_decoder_configuration_once()
+
+        # Confirm the log preserves the value instead of rounding it to zero.
+        decoder_log = next(
+            message
+            for message in logs.output
+            if "Whisper decoder configuration" in message
+        )
+        self.assertIn("compression_ratio=0.0001", decoder_log)
+        self.assertNotIn("compression_ratio=0.000 log_prob=", decoder_log)
 
     def test_decoder_threshold_boundaries_are_accepted(self):
         cases = (

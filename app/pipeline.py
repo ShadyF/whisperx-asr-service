@@ -98,7 +98,7 @@ COMPRESSION_RATIO_THRESHOLD = _read_finite_float(
 )
 LOG_PROB_THRESHOLD = _read_finite_float("LOG_PROB_THRESHOLD", "-1.0")
 
-# Validate each decoder threshold against faster-whisper's supported range.
+# Apply service-level safety bounds before decoder options are constructed.
 if not 0 <= NO_SPEECH_THRESHOLD <= 1:
     raise ValueError("NO_SPEECH_THRESHOLD must be between 0 and 1.")
 if COMPRESSION_RATIO_THRESHOLD <= 0:
@@ -246,8 +246,8 @@ def log_decoder_configuration_once() -> None:
         if _decoder_configuration_logged:
             return
         logger.info(
-            "Whisper decoder configuration: mode=%s no_speech=%.3f "
-            "compression_ratio=%.3f log_prob=%.3f",
+            "Whisper decoder configuration: mode=%s no_speech=%s "
+            "compression_ratio=%s log_prob=%s",
             WHISPER_DECODE_MODE,
             NO_SPEECH_THRESHOLD,
             COMPRESSION_RATIO_THRESHOLD,
