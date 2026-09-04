@@ -240,6 +240,42 @@ class TestPipelineNativeDecode(unittest.TestCase):
         self.assertEqual(second_kwargs["hotwords"], "term")
         self.assertIsNone(second_kwargs["initial_prompt"])
 
+    def test_native_passes_configured_decoder_thresholds_directly(self):
+        # Configure the native decoder thresholds at process startup.
+        pipeline = self._pipeline(
+            WHISPER_DECODE_MODE="native",
+            NO_SPEECH_THRESHOLD="0.2",
+            COMPRESSION_RATIO_THRESHOLD="3.3",
+            LOG_PROB_THRESHOLD="-0.2",
+        )
+        wrapper = self._wrapper(
+            pipeline,
+            [{"start": 0, "end": 1, "segments": []}],
+            [(iter([]), object())],
+            preset_language="en",
+        )
+        pipeline.load_whisper_model = Mock(return_value=wrapper)
+
+        # Decode one VAD chunk through the public native dispatcher.
+        pipeline.transcribe([0] * 10)
+
+        # Confirm native decoding receives the configured threshold values directly.
+        self.assertEqual(
+            {
+                key: wrapper.model.transcribe.call_args.kwargs[key]
+                for key in (
+                    "no_speech_threshold",
+                    "compression_ratio_threshold",
+                    "log_prob_threshold",
+                )
+            },
+            {
+                "no_speech_threshold": 0.2,
+                "compression_ratio_threshold": 3.3,
+                "log_prob_threshold": -0.2,
+            },
+        )
+
     def test_native_detects_once_and_reuses_language_for_each_chunk(self):
         pipeline = self._pipeline(WHISPER_DECODE_MODE="native")
         wrapper = self._wrapper(

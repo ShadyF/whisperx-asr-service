@@ -25,6 +25,7 @@ from app.pipeline import (
     transcribe as _transcribe,
     align as _align,
     diarize as _diarize,
+    log_decoder_configuration_once,
     load_whisper_model,
     load_align_model,
     load_diarize_pipeline,
@@ -99,6 +100,9 @@ class FullPipelineDeployment:
 
     def __init__(self):
         _attach_serve_handlers_to_app_logger()
+
+        # Log decoder settings after Ray handlers are attached to this replica.
+        log_decoder_configuration_once()
         self._ready = False
 
         # Log which GPU this replica landed on
@@ -172,6 +176,9 @@ class WhisperDeployment:
 
     def __init__(self):
         _attach_serve_handlers_to_app_logger()
+
+        # Log decoder settings after Ray handlers are attached to this replica.
+        log_decoder_configuration_once()
         self._ready = False
         if torch.cuda.is_available():
             gpu_id = torch.cuda.current_device()

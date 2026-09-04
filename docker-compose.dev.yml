@@ -35,6 +35,10 @@ services:
       - BATCH_SIZE=${BATCH_SIZE:-16}
       # Decoder path: batched preserves compatibility; native serializes VAD chunks.
       - WHISPER_DECODE_MODE=${WHISPER_DECODE_MODE:-batched}
+      # Native faster-whisper decoder thresholds; see README for batched limitation.
+      - NO_SPEECH_THRESHOLD=${NO_SPEECH_THRESHOLD:-0.6}
+      - COMPRESSION_RATIO_THRESHOLD=${COMPRESSION_RATIO_THRESHOLD:-2.4}
+      - LOG_PROB_THRESHOLD=${LOG_PROB_THRESHOLD:--1.0}
       - HF_TOKEN=${HF_TOKEN}
       - CACHE_DIR=${CACHE_DIR:-/.cache}
       - HF_HOME=${CACHE_DIR:-/.cache}

@@ -80,8 +80,15 @@ Common environment variables. Full reference is in the GitHub README.
 | `SERVE_MODE` | `simple` | `simple` (uvicorn) or `ray` (Ray Serve with batching) |
 | `MODEL_KEEP_ALIVE_SECONDS` | `0` (disabled) | Unload idle Whisper models after this many seconds |
 | `MODEL_EVICTION_INTERVAL_SECONDS` | `60` (floor 30) | Sweep cadence for the eviction daemon |
+| `NO_SPEECH_THRESHOLD` | `0.6` | Native faster-whisper silence threshold (`0`-`1`) |
+| `COMPRESSION_RATIO_THRESHOLD` | `2.4` | Native faster-whisper fallback threshold (greater than `0`) |
+| `LOG_PROB_THRESHOLD` | `-1.0` | Native faster-whisper fallback threshold (at most `0`) |
 
-For multi-GPU, Ray Serve, pipeline strategies, hotwords, OpenAI-compatible parameters, offline use, and the full Prometheus metrics catalogue, see the [GitHub README](https://github.com/murtaza-nasir/whisperx-asr-service#readme).
+Set `WHISPER_DECODE_MODE=native` when decoder thresholds must alter decoding.
+Pinned WhisperX batched generation receives the values but does not apply its
+fallback or silence-threshold logic. For multi-GPU, Ray Serve, pipeline
+strategies, hotwords, OpenAI-compatible parameters, offline use, and the full
+Prometheus metrics catalogue, see the [GitHub README](https://github.com/murtaza-nasir/whisperx-asr-service#readme).
 
 ## Source and license
 

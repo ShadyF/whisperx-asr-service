@@ -23,6 +23,7 @@ from app.pipeline import (
     BATCH_SIZE,
     HF_TOKEN,
     DEFAULT_MODEL,
+    log_decoder_configuration_once,
     load_whisper_model,
     clear_gpu_memory,
     format_timestamp,
@@ -54,6 +55,10 @@ SERVE_MODE = os.getenv("SERVE_MODE", "simple")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: preload models on startup."""
+    # Record the process-wide decoder settings after application logging is ready.
+    log_decoder_configuration_once()
+
+    # Publish immutable runtime details before optional model preloading begins.
     prom_metrics.SERVICE_INFO.info({
         "version": __version__,
         "device": DEVICE,

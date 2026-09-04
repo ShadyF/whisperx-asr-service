@@ -66,8 +66,8 @@ def _read_vad_chunk_size() -> int:
     return chunk_size
 
 
-def _read_vad_threshold(name: str, default: str) -> float:
-    """Read and validate one process-wide ASR VAD threshold."""
+def _read_finite_float(name: str, default: str) -> float:
+    """Read one finite float used by process-wide ASR configuration."""
     value = os.getenv(name, default)
 
     # Reject malformed startup configuration before models can be constructed.
@@ -76,7 +76,7 @@ def _read_vad_threshold(name: str, default: str) -> float:
     except ValueError as error:
         raise ValueError(f"{name} must be a float.") from error
 
-    # Reject non-finite values because they cannot satisfy a probability bound.
+    # Reject non-finite values before domain-specific bounds are checked.
     if not math.isfinite(threshold):
         raise ValueError(f"{name} must be a finite float.")
     return threshold
@@ -84,12 +84,27 @@ def _read_vad_threshold(name: str, default: str) -> float:
 
 # Read these once so every cached Whisper model in this process shares VAD settings.
 VAD_CHUNK_SIZE = _read_vad_chunk_size()
-VAD_ONSET = _read_vad_threshold("VAD_ONSET", ".500")
-VAD_OFFSET = _read_vad_threshold("VAD_OFFSET", ".363")
+VAD_ONSET = _read_finite_float("VAD_ONSET", ".500")
+VAD_OFFSET = _read_finite_float("VAD_OFFSET", ".363")
 
 # Validate the related thresholds together because offset must not exceed onset.
 if not 0 <= VAD_OFFSET <= VAD_ONSET <= 1:
     raise ValueError("VAD thresholds must satisfy 0 <= VAD_OFFSET <= VAD_ONSET <= 1.")
+
+# Read these once so native decodes and constructed batched options share settings.
+NO_SPEECH_THRESHOLD = _read_finite_float("NO_SPEECH_THRESHOLD", "0.6")
+COMPRESSION_RATIO_THRESHOLD = _read_finite_float(
+    "COMPRESSION_RATIO_THRESHOLD", "2.4"
+)
+LOG_PROB_THRESHOLD = _read_finite_float("LOG_PROB_THRESHOLD", "-1.0")
+
+# Validate each decoder threshold against faster-whisper's supported range.
+if not 0 <= NO_SPEECH_THRESHOLD <= 1:
+    raise ValueError("NO_SPEECH_THRESHOLD must be between 0 and 1.")
+if COMPRESSION_RATIO_THRESHOLD <= 0:
+    raise ValueError("COMPRESSION_RATIO_THRESHOLD must be greater than 0.")
+if LOG_PROB_THRESHOLD > 0:
+    raise ValueError("LOG_PROB_THRESHOLD must be less than or equal to 0.")
 
 # Idle model eviction. Set MODEL_KEEP_ALIVE_SECONDS > 0 to unload Whisper,
 # alignment and diarization models that have not been used in that many
@@ -218,6 +233,27 @@ def resolve_model_name(model: str) -> str:
 
 _model_load_lock = threading.Lock()
 _transcription_lock = threading.Lock()
+_decoder_configuration_log_lock = threading.Lock()
+_decoder_configuration_logged = False
+
+
+def log_decoder_configuration_once() -> None:
+    """Log resolved decoder settings once after the process logger is ready."""
+    global _decoder_configuration_logged
+
+    # Serialize the guard so concurrent model loads cannot duplicate this summary.
+    with _decoder_configuration_log_lock:
+        if _decoder_configuration_logged:
+            return
+        logger.info(
+            "Whisper decoder configuration: mode=%s no_speech=%.3f "
+            "compression_ratio=%.3f log_prob=%.3f",
+            WHISPER_DECODE_MODE,
+            NO_SPEECH_THRESHOLD,
+            COMPRESSION_RATIO_THRESHOLD,
+            LOG_PROB_THRESHOLD,
+        )
+        _decoder_configuration_logged = True
 
 # ---------------------------------------------------------------------------
 # Model caches
@@ -252,6 +288,9 @@ def load_whisper_model(model_name: str):
     if model_name not in _whisper_models:
         with _model_load_lock:
             if model_name not in _whisper_models:
+                # Cover lazy and programmatic use that bypasses application startup.
+                log_decoder_configuration_once()
+
                 # Record immutable ASR VAD settings only when this cache entry is built.
                 logger.info("Loading WhisperX model: %s", model_name)
                 logger.info(
@@ -260,7 +299,12 @@ def load_whisper_model(model_name: str):
                     VAD_ONSET,
                     VAD_OFFSET,
                 )
-                logger.info("Whisper decode mode: %s", WHISPER_DECODE_MODE)
+                # Configure batched TranscriptionOptions during model construction.
+                asr_options = {
+                    "no_speech_threshold": NO_SPEECH_THRESHOLD,
+                    "compression_ratio_threshold": COMPRESSION_RATIO_THRESHOLD,
+                    "log_prob_threshold": LOG_PROB_THRESHOLD,
+                }
                 model = whisperx.load_model(
                     model_name,
                     device=DEVICE,
@@ -271,6 +315,7 @@ def load_whisper_model(model_name: str):
                         "vad_onset": VAD_ONSET,
                         "vad_offset": VAD_OFFSET,
                     },
+                    asr_options=asr_options,
                 )
                 _whisper_models[model_name] = model
                 logger.info(f"Model {model_name} loaded successfully")
@@ -647,9 +692,9 @@ def _native_transcribe(
                 "hotwords": hotwords,
                 "initial_prompt": initial_prompt if chunk_index == 0 else None,
                 "condition_on_previous_text": False,
-                "compression_ratio_threshold": 2.4,
-                "log_prob_threshold": -1.0,
-                "no_speech_threshold": 0.6,
+                "compression_ratio_threshold": COMPRESSION_RATIO_THRESHOLD,
+                "log_prob_threshold": LOG_PROB_THRESHOLD,
+                "no_speech_threshold": NO_SPEECH_THRESHOLD,
                 "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
                 "beam_size": 5,
                 "vad_filter": False,

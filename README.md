@@ -363,8 +363,20 @@ changing those thresholds at the same time. Because decoding is serial, use
 `GPU_CONCURRENCY=1`; on constrained cards such as a GTX 1660, `ALIGN_DEVICE=cpu`
 also leaves more GPU memory for decoding.
 
+`NO_SPEECH_THRESHOLD` (default `0.6`), `COMPRESSION_RATIO_THRESHOLD` (default
+`2.4`), and `LOG_PROB_THRESHOLD` (default `-1.0`) are process-wide startup
+settings. They alter native faster-whisper decoding. The pinned WhisperX
+batched path receives these values in `TranscriptionOptions`, but its batched
+generation does not operationally apply fallback or silence-threshold logic;
+use native mode when these thresholds must affect decoding. Values must satisfy
+`0 <= NO_SPEECH_THRESHOLD <= 1`, `COMPRESSION_RATIO_THRESHOLD > 0`, and
+`LOG_PROB_THRESHOLD <= 0`.
+
 ```yaml
 WHISPER_DECODE_MODE: native
+NO_SPEECH_THRESHOLD: "0.6"
+COMPRESSION_RATIO_THRESHOLD: "2.4"
+LOG_PROB_THRESHOLD: "-1.0"
 VAD_CHUNK_SIZE: "20"
 VAD_ONSET: "0.500"
 VAD_OFFSET: "0.363"
@@ -561,6 +573,12 @@ BATCH_SIZE=16           # 16 for 8GB VRAM, 32+ for high-end GPUs, 1-2 on CPU
 # the cached faster-whisper model and existing Pyannote VAD, then decodes VAD
 # chunks serially. BATCH_SIZE is ignored only by native mode.
 WHISPER_DECODE_MODE=batched
+
+# Faster-whisper decoder thresholds. These affect decoding only in native mode;
+# pinned WhisperX batched generation does not apply fallback/silence logic.
+NO_SPEECH_THRESHOLD=0.6
+COMPRESSION_RATIO_THRESHOLD=2.4
+LOG_PROB_THRESHOLD=-1.0
 
 # Hugging Face token for diarization
 HF_TOKEN=hf_xxx...

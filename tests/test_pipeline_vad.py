@@ -96,6 +96,9 @@ class TestPipelineVadConfiguration(unittest.TestCase):
         self.assertEqual(pipeline.VAD_CHUNK_SIZE, 30)
         self.assertEqual(pipeline.VAD_ONSET, 0.500)
         self.assertEqual(pipeline.VAD_OFFSET, 0.363)
+        self.assertEqual(pipeline.NO_SPEECH_THRESHOLD, 0.6)
+        self.assertEqual(pipeline.COMPRESSION_RATIO_THRESHOLD, 2.4)
+        self.assertEqual(pipeline.LOG_PROB_THRESHOLD, -1.0)
 
         # Construct a model to verify defaults reach WhisperX unchanged.
         with self.assertLogs("app.pipeline", "INFO") as logs:
@@ -108,16 +111,30 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             compute_type="int8",
             download_root="/.cache",
             vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
+            asr_options={
+                "no_speech_threshold": 0.6,
+                "compression_ratio_threshold": 2.4,
+                "log_prob_threshold": -1.0,
+            },
         )
         self.assertIn(
             "INFO:app.pipeline:ASR VAD configuration: chunk_size=30 onset=0.500 offset=0.363",
             logs.output,
         )
-        self.assertIn("INFO:app.pipeline:Whisper decode mode: batched", logs.output)
+        self.assertIn(
+            "INFO:app.pipeline:Whisper decoder configuration: mode=batched no_speech=0.600 "
+            "compression_ratio=2.400 log_prob=-1.000",
+            logs.output,
+        )
 
     def test_custom_vad_environment_is_passed_when_cached_model_is_constructed(self):
         pipeline = self._load_pipeline(
-            VAD_CHUNK_SIZE="20", VAD_ONSET="0.700", VAD_OFFSET="0.400"
+            VAD_CHUNK_SIZE="20",
+            VAD_ONSET="0.700",
+            VAD_OFFSET="0.400",
+            NO_SPEECH_THRESHOLD="0.7",
+            COMPRESSION_RATIO_THRESHOLD="3.1",
+            LOG_PROB_THRESHOLD="-0.4",
         )
 
         # Load twice to prove VAD options are supplied only at cache construction.
@@ -132,11 +149,61 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             compute_type="int8",
             download_root="/.cache",
             vad_options={"chunk_size": 20, "vad_onset": 0.7, "vad_offset": 0.4},
+            asr_options={
+                "no_speech_threshold": 0.7,
+                "compression_ratio_threshold": 3.1,
+                "log_prob_threshold": -0.4,
+            },
         )
         self.assertEqual(
             [message for message in logs.output if "ASR VAD" in message],
             ["INFO:app.pipeline:ASR VAD configuration: chunk_size=20 onset=0.700 offset=0.400"],
         )
+        self.assertEqual(
+            [message for message in logs.output if "Whisper decoder configuration" in message],
+            [
+                "INFO:app.pipeline:Whisper decoder configuration: mode=batched no_speech=0.700 "
+                "compression_ratio=3.100 log_prob=-0.400"
+            ],
+        )
+
+    def test_decoder_configuration_logs_once_across_model_loads(self):
+        pipeline = self._load_pipeline()
+
+        # Construct separate cache entries to exercise the lazy logging fallback.
+        with self.assertLogs("app.pipeline", "INFO") as logs:
+            pipeline.load_whisper_model("small")
+            pipeline.load_whisper_model("medium")
+
+        self.assertEqual(
+            [
+                message
+                for message in logs.output
+                if "Whisper decoder configuration" in message
+            ],
+            [
+                "INFO:app.pipeline:Whisper decoder configuration: mode=batched "
+                "no_speech=0.600 compression_ratio=2.400 log_prob=-1.000"
+            ],
+        )
+
+    def test_decoder_threshold_boundaries_are_accepted(self):
+        cases = (
+            ({"NO_SPEECH_THRESHOLD": "0"}, "NO_SPEECH_THRESHOLD", 0.0),
+            ({"NO_SPEECH_THRESHOLD": "1"}, "NO_SPEECH_THRESHOLD", 1.0),
+            ({"LOG_PROB_THRESHOLD": "0"}, "LOG_PROB_THRESHOLD", 0.0),
+            (
+                {"COMPRESSION_RATIO_THRESHOLD": "0.0001"},
+                "COMPRESSION_RATIO_THRESHOLD",
+                0.0001,
+            ),
+        )
+
+        # Import each boundary value in a fresh process-wide configuration.
+        for environment, name, expected in cases:
+            with self.subTest(environment=environment):
+                pipeline = self._load_pipeline(**environment)
+                self.assertEqual(getattr(pipeline, name), expected)
 
     def test_invalid_vad_values_fail_at_import(self):
         # Cover malformed values, bounds, non-finite floats, and threshold order.
@@ -147,6 +214,16 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             ({"VAD_OFFSET": "nope"}, "VAD_OFFSET must be a float"),
             ({"VAD_OFFSET": "nan"}, "VAD_OFFSET must be a finite float"),
             ({"VAD_ONSET": "0.3", "VAD_OFFSET": "0.4"}, "VAD thresholds must satisfy"),
+            ({"NO_SPEECH_THRESHOLD": "nope"}, "NO_SPEECH_THRESHOLD must be a float"),
+            ({"NO_SPEECH_THRESHOLD": "inf"}, "NO_SPEECH_THRESHOLD must be a finite float"),
+            ({"NO_SPEECH_THRESHOLD": "-0.1"}, "NO_SPEECH_THRESHOLD must be between 0 and 1"),
+            ({"NO_SPEECH_THRESHOLD": "1.1"}, "NO_SPEECH_THRESHOLD must be between 0 and 1"),
+            ({"COMPRESSION_RATIO_THRESHOLD": "nope"}, "COMPRESSION_RATIO_THRESHOLD must be a float"),
+            ({"COMPRESSION_RATIO_THRESHOLD": "nan"}, "COMPRESSION_RATIO_THRESHOLD must be a finite float"),
+            ({"COMPRESSION_RATIO_THRESHOLD": "0"}, "COMPRESSION_RATIO_THRESHOLD must be greater than 0"),
+            ({"LOG_PROB_THRESHOLD": "nope"}, "LOG_PROB_THRESHOLD must be a float"),
+            ({"LOG_PROB_THRESHOLD": "-inf"}, "LOG_PROB_THRESHOLD must be a finite float"),
+            ({"LOG_PROB_THRESHOLD": "0.1"}, "LOG_PROB_THRESHOLD must be less than or equal to 0"),
         )
 
         # Import each case in a fresh environment and check its startup error.
