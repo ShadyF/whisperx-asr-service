@@ -189,8 +189,10 @@ users should swap to `:blackwell` (PyTorch 2.8.0 / cu128). See
 
 ```bash
 # Pick the right tag for your GPU:
-IMAGE=learnedmachine/whisperx-asr-service:latest      # 10xx-40xx, A/H-series
-# IMAGE=learnedmachine/whisperx-asr-service:blackwell # RTX 50xx only
+# 10xx-40xx, A/H-series
+IMAGE=learnedmachine/whisperx-asr-service:latest
+# RTX 50xx only
+# IMAGE=learnedmachine/whisperx-asr-service:blackwell
 
 docker run -d \
   --name whisperx-asr-api \
@@ -496,10 +498,12 @@ Edit `.env` to customize:
 
 ```bash
 # GPU or CPU processing
-DEVICE=cuda              # cuda for GPU, cpu for CPU-only
+# cuda for GPU, cpu for CPU-only
+DEVICE=cuda
 
 # Computation precision
-COMPUTE_TYPE=float16     # float16 (GPU), float32 (CPU), int8 (faster, lower quality)
+# float16 (GPU), float32 (CPU), int8 (faster, lower quality)
+COMPUTE_TYPE=float16
 
 # Alignment stage device (defaults to DEVICE). cpu keeps the Wav2Vec2
 # alignment model off the GPU to reduce VRAM on small cards, at the cost
@@ -508,29 +512,43 @@ COMPUTE_TYPE=float16     # float16 (GPU), float32 (CPU), int8 (faster, lower qua
 
 # Batch size (higher = faster but more memory). Default is device-aware:
 # 16 on cuda, 2 on cpu. Long audio on CPU benefits from BATCH_SIZE=1.
-BATCH_SIZE=16           # 16 for 8GB VRAM, 32+ for high-end GPUs, 1-2 on CPU
+# 16 for 8GB VRAM, 32+ for high-end GPUs, 1-2 on CPU
+BATCH_SIZE=16
 
 # Hugging Face token for diarization
 HF_TOKEN=hf_xxx...
 
-# Model preloading (optional, reduces first-request latency)
-PRELOAD_MODEL=large-v3   # Leave empty to disable, or set to: tiny, base, small, medium, large-v2, large-v3
+# Model preloading (optional, reduces first-request latency). Leave empty
+# to load models on first use; requests that name no model then use
+# DEFAULT_MODEL, or large-v3. See "Model Defaults and Preloading" below.
+PRELOAD_MODEL=large-v3
+# Model for requests that name none (default: PRELOAD_MODEL, else large-v3)
+# DEFAULT_MODEL=large-v3
+# Optional limits: models clients may request, and models kept in memory
+# ALLOWED_MODELS=large-v3,turbo,distil-large-v3.5
+# MAX_LOADED_MODELS=2
 
 # Maximum file size in MB (prevents out-of-memory errors)
-MAX_FILE_SIZE_MB=1000    # Default 1GB, adjust lower for GPUs with <16GB VRAM
+# Default 1GB, adjust lower for GPUs with <16GB VRAM
+MAX_FILE_SIZE_MB=1000
 
 # Idle model eviction (default disabled). When > 0, Whisper models that have
 # not served a request in this many seconds are unloaded from memory by a
 # background sweep. The next request that needs the model will reload it.
-MODEL_KEEP_ALIVE_SECONDS=0          # 0 disables eviction; e.g. 3600 = 1 hour
-MODEL_EVICTION_INTERVAL_SECONDS=60  # Sweep frequency (floor of 30 seconds)
+# 0 disables eviction; e.g. 3600 = 1 hour
+MODEL_KEEP_ALIVE_SECONDS=0
+# Sweep frequency (floor of 30 seconds)
+MODEL_EVICTION_INTERVAL_SECONDS=60
 
 # Diarization hyperparameter tuning (optional, unset = model defaults).
 # See "Tuning Diarization Hyperparameters" above for details.
-# DIARIZE_CLUSTERING_THRESHOLD=0.5   # default 0.6; lower = split merged voices
-# DIARIZE_MIN_DURATION_OFF=0.2       # default 0.0; raise = reduce over-segmentation
+# default 0.6; lower = split merged voices
+# DIARIZE_CLUSTERING_THRESHOLD=0.5
+# default 0.0; raise = reduce over-segmentation
+# DIARIZE_MIN_DURATION_OFF=0.2
 # DIARIZE_PARAM_OVERRIDES={"clustering": {"Fb": 1.0}}  # JSON escape hatch (Fa/Fb)
-# DIARIZE_FILL_NEAREST=false         # true = tag orphan segments with nearest speaker
+# true = tag orphan segments with nearest speaker
+# DIARIZE_FILL_NEAREST=false
 
 # Rebuild segments at speaker-change boundaries after diarization, so rapid
 # turns are not merged into one speaker's segment. Always on for the qwen3
@@ -543,8 +561,26 @@ MODEL_EVICTION_INTERVAL_SECONDS=60  # Sweep frequency (floor of 30 seconds)
 # QWEN3_ASR_MODEL=Qwen/Qwen3-ASR-1.7B-hf
 # QWEN3_ALIGNER_MODEL=Qwen/Qwen3-ForcedAligner-0.6B-hf
 # QWEN3_CHUNK_SECONDS=90
-# QWEN3_DEFAULT_CONTEXT=            # standing vocabulary/context biasing text
+# standing vocabulary/context biasing text
+# QWEN3_DEFAULT_CONTEXT=
 ```
+
+### Model Defaults and Preloading
+
+Three settings decide which Whisper model handles a request:
+
+- `PRELOAD_MODEL` loads a model at startup, so the first request does not wait for it. Leave it empty to load models only when a request needs them, for example on a GPU shared with other services. It is skipped on the `qwen3` and `external` backends, which do not transcribe with a Whisper model.
+- `DEFAULT_MODEL` is the model used when a request does not name one. If it is unset, `PRELOAD_MODEL` is used, and if that is also empty, `large-v3`. An empty `PRELOAD_MODEL` therefore disables preloading without leaving such requests without a model. An unusable value falls back to `large-v3` with a warning in the log.
+- `OPENAI_WHISPER1_MODEL` sets the model behind the OpenAI alias `whisper-1` (default: the default model).
+
+A request may name any model that `/v1/models` lists, an OpenAI-style alias (`whisper-1`, `whisper-large-v3`, ...), a Hugging Face id (`org/repo`) or a local model directory. Any other name is rejected with HTTP 400 and the list of accepted names.
+
+Two optional limits protect the GPU on shared servers:
+
+- `ALLOWED_MODELS` (comma-separated) restricts the models clients may request. The default model is always allowed, and `/v1/models` lists only the allowed models.
+- `MAX_LOADED_MODELS` caps the number of Whisper models kept in memory. Loading another model first unloads the least recently used model that no request is using. It combines with `MODEL_KEEP_ALIVE_SECONDS`, which unloads models after a period without use.
+
+The startup log shows the effective settings, for example `Models: default model: large-v3, preload: none`.
 
 ### Serve Mode
 
@@ -572,7 +608,8 @@ Runs on Ray Serve with cross-request batching (`@serve.batch`). Two pipeline str
 
 ```bash
 PIPELINE_STRATEGY=replicate
-NUM_GPU_REPLICAS=4       # one full pipeline per GPU
+# one full pipeline per GPU
+NUM_GPU_REPLICAS=4
 ```
 
 Each GPU runs the complete 3-stage pipeline. Ray Serve routes incoming requests across replicas.
@@ -751,7 +788,8 @@ ASR_BACKEND=qwen3
 # QWEN3_ASR_MODEL=Qwen/Qwen3-ASR-1.7B-hf
 # QWEN3_ALIGNER_MODEL=Qwen/Qwen3-ForcedAligner-0.6B-hf
 # QWEN3_CHUNK_SECONDS=90
-# QWEN3_DEFAULT_CONTEXT=          # standing vocabulary/context biasing text
+# standing vocabulary/context biasing text
+# QWEN3_DEFAULT_CONTEXT=
 ```
 
 **Code-switched audio requires a per-request `language`.** Passing any one
@@ -774,7 +812,8 @@ ASR_BACKEND=external
 EXTERNAL_ASR_BASE_URL=https://api.openai.com/v1
 EXTERNAL_ASR_API_KEY=sk-...
 EXTERNAL_ASR_MODEL=whisper-1
-# EXTERNAL_ASR_MODE=transcriptions   # default; or "chat" for audio-input
+# default; or "chat" for audio-input
+# EXTERNAL_ASR_MODE=transcriptions
                                      # chat models (OpenRouter, vLLM)
 ```
 
@@ -1177,6 +1216,20 @@ For issues and questions:
 - **Docker WhisperX:** [jim60105/docker-whisperX](https://github.com/jim60105/docker-whisperX)
 
 ## Changelog
+
+### v0.4.2 (unreleased)
+
+**Reported issues fixed**
+
+- **Requests without a model failed when `PRELOAD_MODEL` was empty (Speakr #409):** the request default was taken from `PRELOAD_MODEL`, and the shipped compose files forward an unset variable as an empty string, so every request that named no model failed with "Invalid model size ''". An empty `PRELOAD_MODEL` now only disables preloading; such requests use the new `DEFAULT_MODEL`, then `PRELOAD_MODEL`, then `large-v3`.
+
+**Improvements**
+
+- Unknown model names return HTTP 400 with the accepted list instead of a 500 from the engine.
+- `/v1/audio/transcriptions` and `/translations` accept every model `/v1/models` lists (previously only six), and `whisper-1` follows `OPENAI_WHISPER1_MODEL` or the default model in all modes. One resolver serves `/asr`, the OpenAI endpoints and Ray Serve mode.
+- The preload uses the same name resolution as requests (aliases work, no duplicate copy under a second name), is skipped on the `qwen3` and `external` backends, and no longer crash-loops Ray Serve replicas when the name is invalid.
+- New optional `ALLOWED_MODELS` and `MAX_LOADED_MODELS` settings. A model in use is never unloaded by the cap or the idle sweep, and requests for a loaded model no longer wait behind the load of another.
+- Documentation: model defaults explained, `PRELOAD_MODEL` added to the setup guide's `.env`, and inline comments moved off value lines, which `docker run --env-file` keeps as part of the value.
 
 ### v0.3.2 (2026-05-03)
 

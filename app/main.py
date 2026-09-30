@@ -23,12 +23,15 @@ from app.pipeline import (
     BATCH_SIZE,
     HF_TOKEN,
     DEFAULT_MODEL,
+    InvalidModelError,
     load_whisper_model,
     clear_gpu_memory,
     format_timestamp,
     sanitize_float_values,
     run_pipeline,
     resolve_model_name,
+    preload_whisper_model,
+    describe_model_settings,
     _whisper_models as loaded_models,
 )
 from app.queue import run_in_queue, get_queue_metrics
@@ -60,14 +63,7 @@ async def lifespan(app: FastAPI):
         "compute_type": COMPUTE_TYPE,
         "serve_mode": SERVE_MODE,
     })
-    preload_model = os.getenv("PRELOAD_MODEL", None)
-    if preload_model:
-        logger.info(f"Preloading model on startup: {preload_model}")
-        try:
-            load_whisper_model(preload_model)
-            logger.info(f"Successfully preloaded model: {preload_model}")
-        except Exception as e:
-            logger.error(f"Failed to preload model {preload_model}: {str(e)}")
+    preload_whisper_model("startup")
     yield
 
 
@@ -81,7 +77,7 @@ app = FastAPI(
 
 logger.info(f"WhisperX ASR Service v{__version__} initialized on device: {DEVICE}")
 logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")
-logger.info(f"Default model: {DEFAULT_MODEL}, Serve mode: {SERVE_MODE}")
+logger.info(f"Models: {describe_model_settings()}; serve mode: {SERVE_MODE}")
 
 
 @app.get("/")
@@ -106,7 +102,7 @@ async def transcribe_audio(
     word_timestamps: bool = Query(True),
     output_format: str = Query("json"),
     output: Optional[str] = Query(None),
-    model: str = Query(DEFAULT_MODEL),
+    model: Optional[str] = Query(None),
     num_speakers: Optional[int] = Query(None),
     min_speakers: Optional[int] = Query(None),
     max_speakers: Optional[int] = Query(None),
@@ -124,7 +120,8 @@ async def transcribe_audio(
         initial_prompt: Optional prompt to guide the model
         word_timestamps: Return word-level timestamps
         output_format: json, text, srt, vtt, or tsv
-        model: WhisperX model name (tiny, base, small, medium, large-v2, large-v3)
+        model: WhisperX model name (tiny, base, small, medium, large-v3, turbo, ...);
+            omitted or empty uses the server's default model
         num_speakers: Exact number of speakers (if known, overrides min/max)
         min_speakers: Minimum number of speakers for diarization
         max_speakers: Maximum number of speakers for diarization
@@ -144,8 +141,12 @@ async def transcribe_audio(
 
         # Map OpenAI-style aliases (whisper-tiny, whisper-large-v3, whisper-1, ...)
         # to canonical faster-whisper names so /asr accepts the same identifiers
-        # advertised by /v1/models.
-        model = resolve_model_name(model)
+        # advertised by /v1/models. No model means the default model; an
+        # unknown one is a client error.
+        try:
+            model = resolve_model_name(model)
+        except InvalidModelError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         # Resolve diarization toggle
         if diarize is not None or enable_diarization is not None:

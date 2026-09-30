@@ -15,7 +15,8 @@ import time
 import logging
 import threading
 import warnings
-from typing import Optional, Dict, Any, Tuple
+from contextlib import contextmanager
+from typing import Optional, Dict, Any, Tuple, List
 
 # Suppress pyannote's torchcodec warning -- we decode audio via whisperx.load_audio (ffmpeg),
 # not pyannote's built-in decoder, so the missing torchcodec is irrelevant.
@@ -40,15 +41,58 @@ BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16" if DEVICE == "cuda" else "2"))
 ALIGN_DEVICE = os.getenv("ALIGN_DEVICE", "").strip().lower() or DEVICE
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
-DEFAULT_MODEL = os.getenv("PRELOAD_MODEL", "large-v3")
+
+
+def _env_or_none(name: str) -> Optional[str]:
+    """Read an env var, treating unset OR empty/whitespace as None.
+
+    Compose forwards optional vars as `${VAR:-}`, which sets them to an empty
+    string rather than leaving them unset, so a plain os.getenv() would return
+    "" and downstream float() would crash. Normalize that to None here.
+    """
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return value.strip()
+
+
+def _env_int(name: str, default: int) -> int:
+    """Integer env var; unset, empty or unparseable values give the default."""
+    value = _env_or_none(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(f"{name}={value!r} is not an integer; using {default}")
+        return default
+
+
+# Model selection.
+#   PRELOAD_MODEL: Whisper model loaded at startup. Unset or empty means no
+#       preload.
+#   DEFAULT_MODEL: model used when a request names none. Falls back to
+#       PRELOAD_MODEL, then to large-v3, so an empty PRELOAD_MODEL disables
+#       preloading without leaving requests without a model (issue: Speakr
+#       #409). Both are read through _env_or_none because compose forwards
+#       unset variables as empty strings.
+#   ALLOWED_MODELS: optional comma-separated list; when set, requests may only
+#       name these models (the default model is always allowed).
+#   MAX_LOADED_MODELS: optional cap on Whisper models kept in memory at once;
+#       the least recently used idle model is unloaded to make room. 0 = no cap.
+BUILTIN_DEFAULT_MODEL = "large-v3"
+PRELOAD_MODEL = _env_or_none("PRELOAD_MODEL")
+_CONFIGURED_DEFAULT_MODEL = _env_or_none("DEFAULT_MODEL") or PRELOAD_MODEL or BUILTIN_DEFAULT_MODEL
+DEFAULT_MODEL = _CONFIGURED_DEFAULT_MODEL  # resolved to a canonical name below
+MAX_LOADED_MODELS = max(0, _env_int("MAX_LOADED_MODELS", 0))
 
 # Idle model eviction. Set MODEL_KEEP_ALIVE_SECONDS > 0 to unload Whisper,
 # alignment and diarization models that have not been used in that many
 # seconds. Floor of 30s on the sweep interval to avoid pegging a thread on
 # tight loops.
-MODEL_KEEP_ALIVE_SECONDS = int(os.getenv("MODEL_KEEP_ALIVE_SECONDS", "0"))
+MODEL_KEEP_ALIVE_SECONDS = _env_int("MODEL_KEEP_ALIVE_SECONDS", 0)
 MODEL_EVICTION_INTERVAL_SECONDS = max(
-    30, int(os.getenv("MODEL_EVICTION_INTERVAL_SECONDS", "60"))
+    30, _env_int("MODEL_EVICTION_INTERVAL_SECONDS", 60)
 )
 
 # Diarization hyperparameter tuning (pyannote community-1).
@@ -67,19 +111,6 @@ MODEL_EVICTION_INTERVAL_SECONDS = max(
 #   DIARIZE_PARAM_OVERRIDES: escape hatch -- a JSON object deep-merged into the
 #       pipeline's instantiated parameters, for any key the two vars above don't
 #       cover. The exact schema is logged at pipeline load (see logs).
-def _env_or_none(name: str) -> Optional[str]:
-    """Read an env var, treating unset OR empty/whitespace as None.
-
-    Compose forwards optional vars as `${VAR:-}`, which sets them to an empty
-    string rather than leaving them unset, so a plain os.getenv() would return
-    "" and downstream float() would crash. Normalize that to None here.
-    """
-    value = os.getenv(name)
-    if value is None or value.strip() == "":
-        return None
-    return value.strip()
-
-
 DIARIZE_CLUSTERING_THRESHOLD = _env_or_none("DIARIZE_CLUSTERING_THRESHOLD")
 DIARIZE_MIN_DURATION_OFF = _env_or_none("DIARIZE_MIN_DURATION_OFF")
 DIARIZE_PARAM_OVERRIDES = _env_or_none("DIARIZE_PARAM_OVERRIDES")
@@ -130,11 +161,15 @@ def get_canonical_models() -> list:
         ]
 
 
+class InvalidModelError(ValueError):
+    """A requested model name the service cannot or may not load (HTTP 400)."""
+
+
 # OpenAI-style aliases → canonical faster-whisper names. These are kept for
 # backwards compatibility on the request path; new clients should use the
-# canonical names returned by /v1/models.
-_MODEL_ALIASES = {
-    "whisper-1": os.getenv("OPENAI_WHISPER1_MODEL", DEFAULT_MODEL),
+# canonical names returned by /v1/models. `whisper-1` is filled in below,
+# once the default model is known.
+_STATIC_ALIASES = {
     "whisper-large-v3": "large-v3",
     "whisper-large-v2": "large-v2",
     "whisper-medium": "medium",
@@ -142,38 +177,157 @@ _MODEL_ALIASES = {
     "whisper-base": "base",
     "whisper-tiny": "tiny",
 }
+_HF_REPO_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 
-def resolve_model_name(model: str) -> str:
-    """
-    Resolve a user-supplied model identifier to a canonical faster-whisper name.
+def _is_hf_repo_id(name: str) -> bool:
+    """`org/repo` Hugging Face ids, which faster-whisper downloads."""
+    parts = name.split("/")
+    return (
+        len(parts) == 2
+        and all(parts)
+        and all(set(part) <= _HF_REPO_CHARS for part in parts)
+    )
 
-    Accepts canonical names (tiny, large-v3, distil-medium.en, ...) as-is and
-    maps OpenAI-style aliases (whisper-tiny, whisper-large-v3, ...) to their
-    canonical equivalents. Unknown values are returned unchanged so the engine
-    can produce its own validation error.
-    """
-    if not model:
-        return DEFAULT_MODEL
-    canonical = set(get_canonical_models())
-    if model in canonical:
-        return model
-    if model in _MODEL_ALIASES:
-        return _MODEL_ALIASES[model]
-    if model.startswith("whisper-"):
-        stripped = model[len("whisper-"):]
-        if stripped in canonical:
+
+def _map_alias(name: str) -> str:
+    """Apply aliases and the `whisper-<canonical>` prefix; no validation."""
+    if name == "whisper-1":
+        return _MODEL_ALIASES["whisper-1"]
+    if name in _STATIC_ALIASES:
+        return _STATIC_ALIASES[name]
+    if name.startswith("whisper-"):
+        stripped = name[len("whisper-"):]
+        if stripped in set(get_canonical_models()):
             return stripped
-    return model
+    return name
+
+
+def is_loadable_model(name: str) -> bool:
+    """True for names faster-whisper can load: canonical sizes, `org/repo`
+    Hugging Face ids and existing local model directories."""
+    if not name:
+        return False
+    return (
+        name in set(get_canonical_models())
+        or _is_hf_repo_id(name)
+        or os.path.isdir(name)
+    )
+
+
+def _resolve_default(raw: str) -> str:
+    """Canonical form of a configured default; an unusable value falls back
+    to the built-in default with a warning, so a typo cannot fail every
+    request that names no model."""
+    name = raw.strip()
+    if name == "whisper-1":
+        name = _OPENAI_WHISPER1_MODEL or BUILTIN_DEFAULT_MODEL
+    name = _STATIC_ALIASES.get(name, name)
+    if name.startswith("whisper-") and name[len("whisper-"):] in set(get_canonical_models()):
+        name = name[len("whisper-"):]
+    if not is_loadable_model(name):
+        logger.warning(
+            f"Default model {raw!r} is not a model this service can load; "
+            f"using {BUILTIN_DEFAULT_MODEL}. Accepted: "
+            f"{', '.join(get_canonical_models())}, a Hugging Face id (org/repo) "
+            "or a local model directory."
+        )
+        return BUILTIN_DEFAULT_MODEL
+    return name
+
+
+_OPENAI_WHISPER1_MODEL = _env_or_none("OPENAI_WHISPER1_MODEL")
+DEFAULT_MODEL = _resolve_default(_CONFIGURED_DEFAULT_MODEL)
+_MODEL_ALIASES = dict(_STATIC_ALIASES)
+# whisper-1 maps to OPENAI_WHISPER1_MODEL, else the default. A value that is
+# itself "whisper-1" would point the alias at itself, so it is resolved as a
+# default (which never returns "whisper-1").
+_MODEL_ALIASES["whisper-1"] = (
+    _resolve_default(_OPENAI_WHISPER1_MODEL) if _OPENAI_WHISPER1_MODEL else DEFAULT_MODEL
+)
+
+ALLOWED_MODELS: List[str] = []
+for _entry in (_env_or_none("ALLOWED_MODELS") or "").split(","):
+    _entry = _entry.strip()
+    if _entry:
+        _mapped = _map_alias(_entry)
+        if _mapped not in ALLOWED_MODELS:
+            ALLOWED_MODELS.append(_mapped)
+
+
+def resolve_model_name(model: Optional[str]) -> str:
+    """
+    Resolve a user-supplied model identifier to the name the engine loads.
+
+    Empty or whitespace falls back to DEFAULT_MODEL. Canonical names
+    (tiny, large-v3, distil-medium.en, ...) pass through; OpenAI-style aliases
+    (whisper-1, whisper-large-v3, ...) map to canonical names. Hugging Face
+    ids (org/repo) and local model directories are accepted. Anything else,
+    or a model outside ALLOWED_MODELS, raises InvalidModelError, which the
+    endpoints return as HTTP 400.
+    """
+    name = (model or "").strip()
+    if not name:
+        return DEFAULT_MODEL
+    resolved = _map_alias(name)
+    if not is_loadable_model(resolved):
+        raise InvalidModelError(
+            f"Unknown model {name!r}. Accepted: {', '.join(list_available_models())}, "
+            "a Hugging Face id (org/repo) or a local model directory."
+        )
+    if ALLOWED_MODELS and resolved not in ALLOWED_MODELS and resolved != DEFAULT_MODEL:
+        raise InvalidModelError(
+            f"Model {name!r} is not allowed on this server. Allowed: "
+            f"{', '.join(list_available_models())}."
+        )
+    return resolved
+
+
+def list_available_models() -> List[str]:
+    """Canonical model names clients may request (ALLOWED_MODELS applied)."""
+    if ALLOWED_MODELS:
+        names = list(ALLOWED_MODELS)
+        if DEFAULT_MODEL not in names:
+            names.insert(0, DEFAULT_MODEL)
+        return names
+    return get_canonical_models()
+
+
+def describe_model_settings() -> str:
+    """One line for the startup log."""
+    parts = [
+        f"default model: {DEFAULT_MODEL}",
+        f"preload: {PRELOAD_MODEL or 'none'}",
+    ]
+    if ALLOWED_MODELS:
+        parts.append(f"allowed models: {', '.join(ALLOWED_MODELS)}")
+    if MAX_LOADED_MODELS:
+        parts.append(f"max loaded models: {MAX_LOADED_MODELS}")
+    return ", ".join(parts)
+
+
+if _CONFIGURED_DEFAULT_MODEL != DEFAULT_MODEL:
+    logger.info(f"Default model {_CONFIGURED_DEFAULT_MODEL!r} resolves to {DEFAULT_MODEL!r}")
+for _entry in ALLOWED_MODELS:
+    if not is_loadable_model(_entry):
+        logger.warning(f"ALLOWED_MODELS entry {_entry!r} is not a model this service can load")
 
 
 _model_load_lock = threading.Lock()
+# Short-held lock for the Whisper model cache, its last-used times and in-use
+# counts. Loading a model takes _model_load_lock (which serialises the slow
+# loads); requests for a model that is already loaded only take this one, so
+# they never wait behind another model's load.
+_whisper_state_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Model caches
 # ---------------------------------------------------------------------------
 _whisper_models: Dict[str, Any] = {}
 _whisper_models_last_used: Dict[str, float] = {}
+# Requests currently using each Whisper model; such a model is never unloaded
+# by the MAX_LOADED_MODELS cap or the idle sweep.
+_whisper_models_in_use: Dict[str, int] = {}
 _align_models: Dict[str, Tuple[Any, Any]] = {}
 _align_models_last_used: Dict[str, float] = {}
 _diarize_pipeline: Optional[DiarizationPipeline] = None
@@ -197,19 +351,76 @@ def clear_gpu_memory():
 # ---------------------------------------------------------------------------
 # Stage 0 -- model loading
 # ---------------------------------------------------------------------------
-def load_whisper_model(model_name: str):
-    """Load WhisperX model with caching (thread-safe)."""
-    if model_name not in _whisper_models:
+def _count_eviction(model_name: str) -> None:
+    try:
+        from app import metrics as prom_metrics
+        prom_metrics.MODEL_EVICTIONS_TOTAL.labels(model=model_name).inc()
+    except Exception:
+        pass
+
+
+def _make_room_for(model_name: str) -> bool:
+    """With MAX_LOADED_MODELS set, unload least recently used idle Whisper
+    models until one more fits. Caller holds _whisper_state_lock. Returns True
+    if anything was unloaded."""
+    if MAX_LOADED_MODELS <= 0:
+        return False
+    evicted = False
+    while len(_whisper_models) >= MAX_LOADED_MODELS:
+        idle = [
+            name for name in _whisper_models
+            if name != model_name and not _whisper_models_in_use.get(name)
+        ]
+        if not idle:
+            logger.warning(
+                f"MAX_LOADED_MODELS={MAX_LOADED_MODELS} reached and every loaded "
+                f"model is in use; loading {model_name} above the cap"
+            )
+            break
+        victim = min(idle, key=lambda name: _whisper_models_last_used.get(name, 0.0))
+        logger.info(f"Unloading model {victim} to stay within MAX_LOADED_MODELS={MAX_LOADED_MODELS}")
+        del _whisper_models[victim]
+        _whisper_models_last_used.pop(victim, None)
+        _count_eviction(victim)
+        evicted = True
+    return evicted
+
+
+def _take_cached(model_name: str, acquire: bool):
+    """The cached model (marked used, and in use if acquire), or None.
+    Caller holds _whisper_state_lock."""
+    model = _whisper_models.get(model_name)
+    if model is None:
+        return None
+    _whisper_models_last_used[model_name] = time.time()
+    if acquire:
+        _whisper_models_in_use[model_name] = _whisper_models_in_use.get(model_name, 0) + 1
+    return model
+
+
+def load_whisper_model(model_name: str, _acquire: bool = False):
+    """Load WhisperX model with caching (thread-safe).
+
+    With _acquire=True the model is also marked in use (see use_whisper_model)
+    in the same step, so it cannot be unloaded between loading and use.
+    """
+    with _whisper_state_lock:
+        model = _take_cached(model_name, _acquire)
+    if model is None:
         with _model_load_lock:
-            if model_name not in _whisper_models:
+            with _whisper_state_lock:
+                model = _take_cached(model_name, _acquire)
+                freed = False if model is not None else _make_room_for(model_name)
+            if model is None:
+                if freed:
+                    clear_gpu_memory()
                 logger.info(f"Loading WhisperX model: {model_name}")
-                model = whisperx.load_model(
+                loaded = whisperx.load_model(
                     model_name,
                     device=DEVICE,
                     compute_type=COMPUTE_TYPE,
                     download_root=CACHE_DIR,
                 )
-                _whisper_models[model_name] = model
                 logger.info(f"Model {model_name} loaded successfully")
                 # Pre-register the eviction counter time series for this model
                 # so the row appears in /metrics with value 0 from the moment
@@ -219,9 +430,54 @@ def load_whisper_model(model_name: str):
                     prom_metrics.MODEL_EVICTIONS_TOTAL.labels(model=model_name)
                 except Exception:
                     pass
-    _whisper_models_last_used[model_name] = time.time()
+                with _whisper_state_lock:
+                    _whisper_models[model_name] = loaded
+                    model = _take_cached(model_name, _acquire)
     _ensure_eviction_thread()
-    return _whisper_models[model_name]
+    return model
+
+
+@contextmanager
+def use_whisper_model(model_name: str):
+    """Load (or reuse) a Whisper model and keep it loaded while in use."""
+    model = load_whisper_model(model_name, _acquire=True)
+    try:
+        yield model
+    finally:
+        with _whisper_state_lock:
+            remaining = _whisper_models_in_use.get(model_name, 0) - 1
+            if remaining > 0:
+                _whisper_models_in_use[model_name] = remaining
+            else:
+                _whisper_models_in_use.pop(model_name, None)
+            _whisper_models_last_used[model_name] = time.time()
+
+
+def preload_whisper_model(where: str = "startup") -> Optional[str]:
+    """Preload PRELOAD_MODEL, if set. Never raises: a failed preload is logged
+    and the model loads on the first request that needs it.
+
+    Skipped on the qwen3 and external backends, whose transcription does not
+    use a Whisper model (only task=translate does, loaded on demand).
+    """
+    if not PRELOAD_MODEL:
+        logger.info(f"{where}: no PRELOAD_MODEL set; models load on first use (default: {DEFAULT_MODEL})")
+        return None
+    if ASR_BACKEND in ("qwen3", "external"):
+        logger.info(
+            f"{where}: ASR_BACKEND={ASR_BACKEND} does not transcribe with a Whisper model; "
+            f"skipping the preload of {PRELOAD_MODEL}"
+        )
+        return None
+    try:
+        name = _resolve_default(PRELOAD_MODEL)
+        logger.info(f"{where}: preloading model {name}")
+        load_whisper_model(name)
+        logger.info(f"{where}: preloaded model {name}")
+        return name
+    except Exception as e:
+        logger.error(f"{where}: failed to preload model {PRELOAD_MODEL!r}: {e}")
+        return None
 
 
 def _ensure_eviction_thread():
@@ -250,6 +506,8 @@ def _evict_from_cache(
     label: str,
     now: float,
     with_metrics: bool = False,
+    in_use: Optional[dict] = None,
+    lock: Optional[threading.Lock] = None,
 ) -> bool:
     """Evict entries idle longer than MODEL_KEEP_ALIVE_SECONDS from a model cache.
 
@@ -257,14 +515,17 @@ def _evict_from_cache(
     deleting to avoid racing against concurrent loaders.
     Returns True if at least one entry was evicted.
     """
-    with _model_load_lock:
+    lock = lock or _model_load_lock
+    with lock:
         snapshot = list(last_used.items())
     candidates = [k for k, last in snapshot
                   if now - last > MODEL_KEEP_ALIVE_SECONDS and k in cache]
     evicted_any = False
     for key in candidates:
-        with _model_load_lock:
+        with lock:
             last = last_used.get(key, 0)
+            if in_use and in_use.get(key):
+                continue
             if key in cache and now - last > MODEL_KEEP_ALIVE_SECONDS:
                 logger.info(f"Evicting idle {label} {key}")
                 del cache[key]
@@ -287,7 +548,8 @@ def _eviction_loop():
             continue
         now = time.time()
         evicted_any = _evict_from_cache(
-            _whisper_models, _whisper_models_last_used, "model", now, with_metrics=True
+            _whisper_models, _whisper_models_last_used, "model", now, with_metrics=True,
+            in_use=_whisper_models_in_use, lock=_whisper_state_lock,
         )
         evicted_any |= _evict_from_cache(
             _align_models, _align_models_last_used, "alignment model for language", now
@@ -454,7 +716,7 @@ def load_diarize_pipeline() -> DiarizationPipeline:
 # ---------------------------------------------------------------------------
 def transcribe(
     audio: np.ndarray,
-    model_name: str = DEFAULT_MODEL,
+    model_name: Optional[str] = None,
     language: Optional[str] = None,
     task: str = "transcribe",
     initial_prompt: Optional[str] = None,
@@ -481,29 +743,29 @@ def transcribe(
             "using whisper backend for this request"
         )
 
-    whisper_model = load_whisper_model(model_name)
-
-    # Set per-request options on the model's transcription options.
-    # The model is cached/shared, so we must reset after transcription.
-    if hotwords is not None:
-        whisper_model.options.hotwords = hotwords
-    if initial_prompt is not None:
-        whisper_model.options.initial_prompt = initial_prompt
-
+    model_name = resolve_model_name(model_name)
     transcribe_options: Dict[str, Any] = {
         "batch_size": BATCH_SIZE,
         "language": language,
         "task": task,
     }
 
-    logger.info("Starting transcription...")
-    try:
-        result = whisper_model.transcribe(audio, **transcribe_options)
-    finally:
+    with use_whisper_model(model_name) as whisper_model:
+        # Set per-request options on the model's transcription options.
+        # The model is cached/shared, so we must reset after transcription.
         if hotwords is not None:
-            whisper_model.options.hotwords = None
+            whisper_model.options.hotwords = hotwords
         if initial_prompt is not None:
-            whisper_model.options.initial_prompt = None
+            whisper_model.options.initial_prompt = initial_prompt
+
+        logger.info("Starting transcription...")
+        try:
+            result = whisper_model.transcribe(audio, **transcribe_options)
+        finally:
+            if hotwords is not None:
+                whisper_model.options.hotwords = None
+            if initial_prompt is not None:
+                whisper_model.options.initial_prompt = None
 
     detected_language = result.get("language", language or "en")
     logger.info(f"Transcription complete. Detected language: {detected_language}")
@@ -671,7 +933,7 @@ def format_timestamp(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 def run_pipeline(
     audio: np.ndarray,
-    model_name: str = DEFAULT_MODEL,
+    model_name: Optional[str] = None,
     language: Optional[str] = None,
     task: str = "transcribe",
     initial_prompt: Optional[str] = None,

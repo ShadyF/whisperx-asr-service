@@ -123,6 +123,9 @@ HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 DEVICE=cuda
 COMPUTE_TYPE=float16
 BATCH_SIZE=16
+# Model loaded at startup. Leave empty to load models on first use; requests
+# that name no model then use DEFAULT_MODEL, or large-v3.
+PRELOAD_MODEL=large-v3
 ```
 
 ### Step 3.5: Pick the Right Image Variant
@@ -336,8 +339,10 @@ runs longer than ~15 minutes drop it to 1 to avoid OOM kills (exit 137).
 ```bash
 DEVICE=cpu
 COMPUTE_TYPE=int8
-BATCH_SIZE=2          # default on cpu; use 1 for >30 min audio, smaller models
-PRELOAD_MODEL=small   # tiny/base/small are realistic on cpu; large-v3 is not
+# default on cpu; use 1 for >30 min audio, smaller models
+BATCH_SIZE=2
+# tiny/base/small are realistic on cpu; large-v3 is not
+PRELOAD_MODEL=small
 ```
 
 ### Idle Model Eviction
@@ -347,8 +352,10 @@ between bursts, set `MODEL_KEEP_ALIVE_SECONDS` to the idle window after which
 a model should be unloaded:
 
 ```bash
-MODEL_KEEP_ALIVE_SECONDS=3600          # unload models idle for 1 hour
-MODEL_EVICTION_INTERVAL_SECONDS=60     # sweep cadence (floor 30 seconds)
+# unload models idle for 1 hour
+MODEL_KEEP_ALIVE_SECONDS=3600
+# sweep cadence (floor 30 seconds)
+MODEL_EVICTION_INTERVAL_SECONDS=60
 ```
 
 Default is `0`, which keeps the previous behaviour (models stay resident
@@ -357,7 +364,7 @@ reloads it transparently.
 
 ### Model Selection in Speakr
 
-Speakr will use the model specified in its requests. The WhisperX service supports:
+Speakr will use the model specified in its requests. A request that names no model uses `DEFAULT_MODEL`, then `PRELOAD_MODEL`, then `large-v3`, so leaving `PRELOAD_MODEL` empty only disables preloading. The WhisperX service supports:
 
 - `tiny` - Fastest, lowest quality
 - `base` - Fast, low quality

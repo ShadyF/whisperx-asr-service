@@ -19,8 +19,10 @@ If your GPU is an RTX 50xx, pull `:blackwell`. Every other NVIDIA card from 10xx
 
 ```bash
 # Pick the tag that matches your GPU.
-IMAGE=learnedmachine/whisperx-asr-service:latest        # 10xx, 20xx, 30xx, 40xx, A-series, H-series
-# IMAGE=learnedmachine/whisperx-asr-service:blackwell   # RTX 50xx
+# 10xx, 20xx, 30xx, 40xx, A-series, H-series
+IMAGE=learnedmachine/whisperx-asr-service:latest
+# RTX 50xx
+# IMAGE=learnedmachine/whisperx-asr-service:blackwell
 
 docker run -d \
   --name whisperx-asr-api \
@@ -75,7 +77,10 @@ Common environment variables. Full reference is in the GitHub README.
 | `COMPUTE_TYPE` | `float16` (cuda), `int8` (cpu) | Computation precision |
 | `BATCH_SIZE` | `16` (cuda), `2` (cpu) | Larger is faster, uses more memory |
 | `HF_TOKEN` | unset | Hugging Face token for diarization |
-| `PRELOAD_MODEL` | `large-v3` | Model to load on startup |
+| `PRELOAD_MODEL` | unset (no preload) | Model to load on startup. The examples set `large-v3`. |
+| `DEFAULT_MODEL` | `PRELOAD_MODEL`, else `large-v3` | Model for requests that name none |
+| `ALLOWED_MODELS` | unset (all) | Comma-separated models clients may request |
+| `MAX_LOADED_MODELS` | `0` (no limit) | Whisper models kept in memory at once |
 | `MAX_FILE_SIZE_MB` | `1000` | Reject larger uploads |
 | `SERVE_MODE` | `simple` | `simple` (uvicorn) or `ray` (Ray Serve with batching) |
 | `MODEL_KEEP_ALIVE_SECONDS` | `0` (disabled) | Unload idle Whisper models after this many seconds |
