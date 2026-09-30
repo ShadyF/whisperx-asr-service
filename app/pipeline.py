@@ -32,17 +32,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration (read once at import time, same as before)
 # ---------------------------------------------------------------------------
-DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
-COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "float16" if DEVICE == "cuda" else "int8")
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16" if DEVICE == "cuda" else "2"))
-# Device for the Wav2Vec2 alignment stage. Defaults to DEVICE; set
-# ALIGN_DEVICE=cpu to keep alignment off the GPU and reduce VRAM at the cost
-# of slower word timestamps (issue #32).
-ALIGN_DEVICE = os.getenv("ALIGN_DEVICE", "").strip().lower() or DEVICE
-HF_TOKEN = os.getenv("HF_TOKEN", None)
-CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
-
-
 def _env_or_none(name: str) -> Optional[str]:
     """Read an env var, treating unset OR empty/whitespace as None.
 
@@ -66,6 +55,17 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         logger.warning(f"{name}={value!r} is not an integer; using {default}")
         return default
+
+
+DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "float16" if DEVICE == "cuda" else "int8")
+BATCH_SIZE = _env_int("BATCH_SIZE", 16 if DEVICE == "cuda" else 2)
+# Device for the Wav2Vec2 alignment stage. Defaults to DEVICE; set
+# ALIGN_DEVICE=cpu to keep alignment off the GPU and reduce VRAM at the cost
+# of slower word timestamps (issue #32).
+ALIGN_DEVICE = os.getenv("ALIGN_DEVICE", "").strip().lower() or DEVICE
+HF_TOKEN = os.getenv("HF_TOKEN", None)
+CACHE_DIR = os.getenv("CACHE_DIR", "/.cache")
 
 
 # Model selection.

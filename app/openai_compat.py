@@ -25,6 +25,7 @@ from app.schemas import (
     OpenAIErrorResponse,
 )
 from app.pipeline import (
+    _env_int,
     DEVICE,
     BATCH_SIZE,
     CACHE_DIR,
@@ -43,7 +44,7 @@ from app.queue import run_in_queue
 
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1000"))
+MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 1000)
 
 router = APIRouter(prefix="/v1/audio", tags=["OpenAI Compatible"])
 models_router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])

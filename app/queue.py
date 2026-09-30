@@ -13,8 +13,22 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "32"))
-GPU_CONCURRENCY = int(os.getenv("GPU_CONCURRENCY", "1"))
+
+
+def _env_int(name: str, default: int) -> int:
+    """Integer env var; unset, empty or unparseable values give the default.
+    (Same rule as app.pipeline._env_int; kept local so this module stays
+    free of the ML imports.)"""
+    value = (os.getenv(name) or "").strip()
+    try:
+        return int(value) if value else default
+    except ValueError:
+        logger.warning(f"{name}={value!r} is not an integer; using {default}")
+        return default
+
+
+MAX_QUEUE_SIZE = _env_int("MAX_QUEUE_SIZE", 32)
+GPU_CONCURRENCY = _env_int("GPU_CONCURRENCY", 1)
 
 # Thread pool for running blocking pipeline calls without blocking the event loop
 _executor = ThreadPoolExecutor(max_workers=GPU_CONCURRENCY)

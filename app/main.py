@@ -18,6 +18,7 @@ import whisperx
 
 from app.version import __version__
 from app.pipeline import (
+    _env_int,
     DEVICE,
     COMPUTE_TYPE,
     BATCH_SIZE,
@@ -50,7 +51,7 @@ logging.basicConfig(
 logging.getLogger("app").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1000"))
+MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 1000)
 SERVE_MODE = os.getenv("SERVE_MODE", "simple")
 
 
