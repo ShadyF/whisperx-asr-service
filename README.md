@@ -1217,19 +1217,21 @@ For issues and questions:
 
 ## Changelog
 
-### v0.4.2 (unreleased)
+### v0.4.2 (2026-09-30)
 
 **Reported issues fixed**
 
-- **Requests without a model failed when `PRELOAD_MODEL` was empty (Speakr #409):** the request default was taken from `PRELOAD_MODEL`, and the shipped compose files forward an unset variable as an empty string, so every request that named no model failed with "Invalid model size ''". An empty `PRELOAD_MODEL` now only disables preloading; such requests use the new `DEFAULT_MODEL`, then `PRELOAD_MODEL`, then `large-v3`.
+- **Requests without a model failed when `PRELOAD_MODEL` was empty (Speakr #409):** the request default was taken from `PRELOAD_MODEL`, and an unset variable is forwarded by the shipped compose files as an empty string, so every request that named no model failed with "Invalid model size ''". An empty `PRELOAD_MODEL` now only disables preloading; for such requests, the new `DEFAULT_MODEL` is used, then `PRELOAD_MODEL`, then `large-v3`.
+- **Malformed number settings stopped the service at startup:** a value such as `BATCH_SIZE=16  # comment`, which `docker run --env-file` keeps whole, made the import fail. `BATCH_SIZE`, `MAX_FILE_SIZE_MB`, `MAX_QUEUE_SIZE` and `GPU_CONCURRENCY` now fall back to their defaults when the value is not a number.
 
 **Improvements**
 
-- Unknown model names return HTTP 400 with the accepted list instead of a 500 from the engine.
-- `/v1/audio/transcriptions` and `/translations` accept every model `/v1/models` lists (previously only six), and `whisper-1` follows `OPENAI_WHISPER1_MODEL` or the default model in all modes. One resolver serves `/asr`, the OpenAI endpoints and Ray Serve mode.
-- The preload uses the same name resolution as requests (aliases work, no duplicate copy under a second name), is skipped on the `qwen3` and `external` backends, and no longer crash-loops Ray Serve replicas when the name is invalid.
-- New optional `ALLOWED_MODELS` and `MAX_LOADED_MODELS` settings. A model in use is never unloaded by the cap or the idle sweep, and requests for a loaded model no longer wait behind the load of another.
-- Documentation: model defaults explained, `PRELOAD_MODEL` added to the setup guide's `.env`, and inline comments moved off value lines, which `docker run --env-file` keeps as part of the value.
+- Unknown model names receive HTTP 400 with the accepted list, where a 500 from the engine was returned before.
+- On `/v1/audio/transcriptions` and `/translations`, every model listed by `/v1/models` is accepted (previously six), and `whisper-1` maps to `OPENAI_WHISPER1_MODEL` or the default model in all modes. The same name resolution now applies to `/asr`, the OpenAI endpoints and Ray Serve mode.
+- The preloaded model is resolved in the same way as requested models, so aliases work and no second copy is loaded under another name. On the `qwen3` and `external` backends, no Whisper model is preloaded, and in Ray Serve mode an invalid preload name is logged without stopping the replica.
+- New optional settings `ALLOWED_MODELS` and `MAX_LOADED_MODELS`. A model in use is never unloaded by the cap or by the idle sweep, and a request for a loaded model is served without waiting for another model to load.
+- Tests for the documented setup: unit tests, a check of the settings produced by `docker-compose.yml` with the setup guide's `.env`, and a service check on stand-in ML packages, run in GitHub Actions on every push without a GPU.
+- Documentation: model defaults explained, `PRELOAD_MODEL` added to the setup guide's `.env`, and inline comments moved off value lines, since `docker run --env-file` keeps them as part of the value.
 
 ### v0.3.2 (2026-05-03)
 
