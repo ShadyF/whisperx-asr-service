@@ -1,6 +1,6 @@
 # WhisperX ASR API Service
 
-[![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/releases/tag/v0.3.2)
+[![Version](https://img.shields.io/badge/version-0.4.5-blue.svg)](https://github.com/ShadyF/whisperx-asr-service/releases/tag/v0.4.5)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Docker Build](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml)
 [![GHCR](https://img.shields.io/badge/GHCR-shadyf%2Fwhisperx--asr--service-blue?logo=github)](https://github.com/shadyf/whisperx-asr-service/pkgs/container/whisperx-asr-service)
@@ -1295,6 +1295,13 @@ For issues and questions:
 - **Docker WhisperX:** [jim60105/docker-whisperX](https://github.com/jim60105/docker-whisperX)
 
 ## Changelog
+
+### v0.4.5 (2026-10-02)
+
+- Integrate upstream model resolution: empty `PRELOAD_MODEL` disables preloading while requests still use a valid default. Model aliases, default selection, and `ALLOWED_MODELS` checks use shared resolution.
+- Track model-cache usage so active and waiting requests protect their models from eviction.
+- Preserve the fork's serialized native decoder, VAD configuration, decoder thresholds, and batched option restoration.
+- Run lightweight unit, documented-defaults, and stub-server end-to-end tests in CI, including the native decoder and VAD regression suites. These tests use stand-in ML packages and do not validate GPU execution.
 
 ### v0.4.2 (2026-09-30)
 
