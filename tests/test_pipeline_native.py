@@ -3,6 +3,7 @@
 import importlib
 import os
 import sys
+import threading
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -143,12 +144,146 @@ class TestPipelineNativeDecode(unittest.TestCase):
             detect_language=Mock(return_value="ar"),
         )
 
+    def _worker(self, action):
+        errors = []
+
+        # Capture failures so background assertions reach the test thread.
+        def run():
+            try:
+                action()
+            except BaseException as error:
+                errors.append(error)
+
+        # Bound cleanup even when a regression leaves a worker blocked.
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 3)
+        return thread, errors
+
+    def test_waiting_leases_protect_cache_and_serialize_request_options(self):
+        pipeline = self._pipeline(MAX_LOADED_MODELS="1")
+        entered, release, waiting = threading.Event(), threading.Event(), threading.Event()
+        wrapper = self._wrapper(pipeline, [], [])
+        observed = []
+
+        # Hold the first request inside the decoder until the second owns a lease.
+        def decode(audio, **kwargs):
+            observed.append((wrapper.options.hotwords, wrapper.options.initial_prompt))
+            if len(observed) == 1:
+                entered.set()
+                self.assertTrue(release.wait(3))
+            return {"segments": [], "language": "en"}
+
+        # Use the production loader while observing the waiter's cache acquisition.
+        wrapper.transcribe = decode
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
+        original_take = pipeline._take_cached
+
+        def take(name, acquire):
+            model = original_take(name, acquire)
+            if pipeline._whisper_models_in_use.get(name) == 2:
+                waiting.set()
+            return model
+
+        pipeline._take_cached = take
+        self.addCleanup(release.set)
+        first, first_errors = self._worker(lambda: pipeline.transcribe([], "whisper-tiny", hotwords="one", initial_prompt="first"))
+        self.assertTrue(entered.wait(3))
+        second, second_errors = self._worker(lambda: pipeline.transcribe([], "tiny", hotwords="two", initial_prompt="second"))
+        self.assertTrue(waiting.wait(3))
+
+        # Active and waiting leases survive both the cap and the idle sweep.
+        pipeline.load_whisper_model("base")
+        self.assertIn("tiny", pipeline._whisper_models)
+        pipeline.MODEL_KEEP_ALIVE_SECONDS = 1
+        pipeline._whisper_models_last_used.update(tiny=0, base=0)
+        pipeline._evict_from_cache(pipeline._whisper_models, pipeline._whisper_models_last_used, "model", 10, in_use=pipeline._whisper_models_in_use, lock=pipeline._whisper_state_lock)
+        self.assertIn("tiny", pipeline._whisper_models)
+        self.assertNotIn("base", pipeline._whisper_models)
+        self.assertEqual(observed, [("one", "first")])
+
+        # Finish both requests and check restored options and canonical cache keys.
+        release.set()
+        first.join(3)
+        second.join(3)
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(first_errors + second_errors, [])
+        self.assertEqual(observed, [("one", "first"), ("two", "second")])
+        self.assertEqual((wrapper.options.hotwords, wrapper.options.initial_prompt), ("saved-hotwords", "saved-prompt"))
+        self.assertEqual(pipeline._whisper_models_in_use, {})
+        self.assertNotIn("whisper-tiny", pipeline._whisper_models)
+
+    def test_cached_lease_does_not_wait_for_unrelated_loading(self):
+        pipeline = self._pipeline()
+        entered, release, acquired = threading.Event(), threading.Event(), threading.Event()
+        wrapper = self._wrapper(pipeline, [], [])
+
+        # Block only the unrelated model's slow loader.
+        def load(name, **kwargs):
+            if name == "base":
+                entered.set()
+                self.assertTrue(release.wait(3))
+            return wrapper
+
+        sys.modules["whisperx"].load_model = load
+        pipeline.load_whisper_model("tiny")
+        self.addCleanup(release.set)
+        loader, load_errors = self._worker(lambda: pipeline.load_whisper_model("base"))
+        self.assertTrue(entered.wait(3))
+
+        # Acquire through the real cache fast path while the load lock is held.
+        def cached():
+            with pipeline.use_whisper_model("tiny"):
+                acquired.set()
+
+        reader, read_errors = self._worker(cached)
+        self.assertTrue(acquired.wait(3))
+        release.set()
+        loader.join(3)
+        reader.join(3)
+        self.assertEqual(load_errors + read_errors, [])
+        self.assertEqual(pipeline._whisper_models_in_use, {})
+
+    def test_failures_release_leases_and_restore_batched_options(self):
+        pipeline = self._pipeline()
+        wrapper = self._wrapper(pipeline, [], [])
+        wrapper.transcribe = Mock(side_effect=RuntimeError("decode failed"))
+
+        # A decode failure must restore original options and release its lease.
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
+        with self.assertRaises(RuntimeError):
+            pipeline.transcribe([], "tiny", hotwords="request", initial_prompt="request")
+        self.assertEqual(pipeline._whisper_models_in_use, {})
+        self.assertEqual((wrapper.options.hotwords, wrapper.options.initial_prompt), ("saved-hotwords", "saved-prompt"))
+
+        # A failed load must never publish a model or an in-use count.
+        sys.modules["whisperx"].load_model = Mock(side_effect=RuntimeError("load failed"))
+        with self.assertRaises(RuntimeError):
+            pipeline.transcribe([], "base")
+        self.assertEqual(pipeline._whisper_models_in_use, {})
+        self.assertNotIn("base", pipeline._whisper_models)
+
+    def test_native_lazy_generator_runs_inside_decode_lock_and_lease(self):
+        pipeline = self._pipeline(WHISPER_DECODE_MODE="native")
+        wrapper = self._wrapper(pipeline, [{"start": 0, "end": 1}], [])
+
+        # Check the lazy execution boundary rather than only generator creation.
+        def segments():
+            self.assertTrue(pipeline._transcription_lock.locked())
+            self.assertEqual(pipeline._whisper_models_in_use, {"tiny": 1})
+            yield Segment(0, 1, " speech")
+
+        wrapper.model.transcribe = Mock(return_value=(segments(), None))
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
+        pipeline.transcribe([0] * 10, "tiny")
+        self.assertEqual(pipeline._whisper_models_in_use, {})
+
     def test_default_mode_is_batched_and_preserves_batched_result_and_options(self):
         pipeline = self._pipeline()
         wrapper = self._wrapper(pipeline, [], [])
         expected = {"segments": [{"start": 0, "end": 1, "text": " kept"}], "language": "en"}
         wrapper.transcribe = Mock(return_value=expected)
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
 
         result = pipeline.transcribe(
             [0] * 10,
@@ -188,7 +323,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
                 (iter([Segment(0, .5, " third")]), object()),
             ],
         )
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
         pipeline.clear_gpu_memory = Mock()
         native_model = wrapper.model
 
@@ -254,7 +389,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
             [(iter([]), object())],
             preset_language="en",
         )
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
 
         # Decode one VAD chunk through the public native dispatcher.
         pipeline.transcribe([0] * 10)
@@ -286,7 +421,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
             ],
             [(iter([]), object()), (iter([]), object())],
         )
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
 
         result = pipeline.transcribe([0] * 20)
 
@@ -305,7 +440,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
             [(iter([Segment(0, .5, " English stays English")]), object())],
         )
         wrapper.tokenizer.language_code = "ar"
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
 
         result = pipeline.transcribe([0] * 10)
 
@@ -324,7 +459,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
             with self.subTest(chunk=chunk):
                 pipeline = self._pipeline(WHISPER_DECODE_MODE="native")
                 wrapper = self._wrapper(pipeline, [chunk], [])
-                pipeline.load_whisper_model = Mock(return_value=wrapper)
+                sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
 
                 with self.assertLogs("app.pipeline", "ERROR") as logs, self.assertRaises(
                     pipeline.NativeDecodeError
@@ -353,7 +488,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
             tokenizer=types.SimpleNamespace(language_code=None),
             detect_language=Mock(),
         )
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
 
         self.assertEqual(pipeline.transcribe([0] * 10), {"segments": [], "language": "en"})
         preprocessor.assert_called_once_with([0] * 10)
@@ -376,7 +511,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
             ],
             [(generator(), object()), RuntimeError("secret transcript")],
         )
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
 
         with self.assertLogs("app.pipeline", "ERROR") as logs, self.assertRaises(
             pipeline.NativeDecodeError
@@ -398,7 +533,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
             [{"start": 0, "end": 1, "segments": []}],
             [(iter([Segment("bad transcript", .5, "hidden text")]), object())],
         )
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
 
         with self.assertLogs("app.pipeline", "ERROR") as logs, self.assertRaises(
             pipeline.NativeDecodeError
@@ -416,7 +551,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
         pipeline = self._pipeline()
         wrapper = self._wrapper(pipeline, [], [])
         wrapper.transcribe = Mock(return_value={"segments": [], "language": "en"})
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
         pipeline._whisper_models["small"] = wrapper
         pipeline._whisper_models_last_used["small"] = 0
 
@@ -429,15 +564,17 @@ class TestPipelineNativeDecode(unittest.TestCase):
         # Arrange empty and blank native outputs without loading real models.
         pipeline = self._pipeline(WHISPER_DECODE_MODE="native")
         wrapper = self._wrapper(pipeline, [], [])
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
         self.assertEqual(pipeline.transcribe([0] * 10), {"segments": [], "language": "ar"})
 
+        # Start the next scenario with an empty cache so the real loader sees its wrapper.
+        pipeline._whisper_models.clear()
         wrapper = self._wrapper(
             pipeline,
             [{"start": 0, "end": 1, "segments": []}],
             [(iter([Segment(0, .5, "   ")]), object())],
         )
-        pipeline.load_whisper_model = Mock(return_value=wrapper)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
         self.assertEqual(pipeline.transcribe([0] * 10)["segments"], [])
 
         # Arrange a native-shaped result and distinct downstream stage outputs.

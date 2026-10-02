@@ -29,6 +29,7 @@ from app.pipeline import (
     load_whisper_model,
     load_align_model,
     load_diarize_pipeline,
+    preload_whisper_model,
     DEFAULT_MODEL,
     HF_TOKEN,
 )
@@ -114,10 +115,9 @@ class FullPipelineDeployment:
                 f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}"
             )
 
-        preload = os.getenv("PRELOAD_MODEL", None)
-        if preload:
-            logger.info(f"FullPipelineDeployment: preloading model {preload}")
-            load_whisper_model(preload)
+        # Never fatal: a bad PRELOAD_MODEL is logged and the replica still
+        # starts (it used to raise here and crash-loop the replica).
+        preload_whisper_model("FullPipelineDeployment")
         if HF_TOKEN:
             logger.info("FullPipelineDeployment: preloading diarization pipeline")
             load_diarize_pipeline()
@@ -132,7 +132,7 @@ class FullPipelineDeployment:
     async def run(
         self,
         audio: np.ndarray,
-        model_name: str = DEFAULT_MODEL,
+        model_name: Optional[str] = None,
         language: Optional[str] = None,
         task: str = "transcribe",
         initial_prompt: Optional[str] = None,
@@ -186,10 +186,7 @@ class WhisperDeployment:
                 f"WhisperDeployment: initialising on cuda:{gpu_id}, "
                 f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}"
             )
-        preload = os.getenv("PRELOAD_MODEL", None)
-        if preload:
-            logger.info(f"WhisperDeployment: preloading model {preload}")
-            load_whisper_model(preload)
+        preload_whisper_model("WhisperDeployment")
         self._ready = True
 
     def check_health(self):
@@ -224,7 +221,7 @@ class WhisperDeployment:
     async def transcribe(
         self,
         audio: np.ndarray,
-        model_name: str = DEFAULT_MODEL,
+        model_name: Optional[str] = None,
         language: Optional[str] = None,
         task: str = "transcribe",
         initial_prompt: Optional[str] = None,

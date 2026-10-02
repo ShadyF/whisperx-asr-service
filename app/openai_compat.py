@@ -25,14 +25,17 @@ from app.schemas import (
     OpenAIErrorResponse,
 )
 from app.pipeline import (
+    _env_int,
     DEVICE,
     BATCH_SIZE,
     CACHE_DIR,
     DEFAULT_MODEL,
+    InvalidModelError,
     load_whisper_model,
     clear_gpu_memory,
     format_timestamp,
-    get_canonical_models,
+    list_available_models,
+    resolve_model_name,
     transcribe as pipeline_transcribe,
     align as pipeline_align,
     _whisper_models as loaded_models,
@@ -41,21 +44,14 @@ from app.queue import run_in_queue
 
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1000"))
+MAX_FILE_SIZE_MB = _env_int("MAX_FILE_SIZE_MB", 1000)
 
 router = APIRouter(prefix="/v1/audio", tags=["OpenAI Compatible"])
 models_router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
-# Model mapping: OpenAI model names to WhisperX model names
-MODEL_MAPPING = {
-    "whisper-1": os.getenv("OPENAI_WHISPER1_MODEL", DEFAULT_MODEL),
-    "whisper-large-v3": "large-v3",
-    "whisper-large-v2": "large-v2",
-    "whisper-medium": "medium",
-    "whisper-small": "small",
-    "whisper-base": "base",
-    "whisper-tiny": "tiny",
-}
+# Model names (whisper-1 and the other OpenAI-style aliases, canonical
+# faster-whisper names, Hugging Face ids) are resolved by
+# app.pipeline.resolve_model_name, shared with /asr and Ray Serve mode.
 
 
 def create_openai_error(
@@ -197,17 +193,13 @@ async def process_audio(
     temp_audio_path = None
 
     try:
-        # Validate model
-        whisperx_model = MODEL_MAPPING.get(model)
-        if not whisperx_model:
-            if model in ["tiny", "base", "small", "medium", "large-v2", "large-v3"]:
-                whisperx_model = model
-            else:
-                return create_openai_error(
-                    400,
-                    f"Invalid model: {model}. Supported: whisper-1, or whisperx models (tiny, base, small, medium, large-v2, large-v3)",
-                    param="model"
-                )
+        # Validate model: every name /v1/models lists is accepted. The field
+        # stays required, as in the OpenAI API; an empty value uses the
+        # server's default model.
+        try:
+            whisperx_model = resolve_model_name(model)
+        except InvalidModelError as e:
+            return create_openai_error(400, str(e), param="model")
 
         # Validate timestamp_granularities requires verbose_json
         if timestamp_granularities and response_format != ResponseFormat.VERBOSE_JSON:
@@ -406,7 +398,7 @@ async def create_translation(
 # this list stays in sync with whatever engine version is installed.
 def _build_available_models():
     models = [{"id": "whisper-1", "object": "model", "owned_by": "openai"}]
-    for name in get_canonical_models():
+    for name in list_available_models():
         models.append({"id": name, "object": "model", "owned_by": "whisperx"})
     return models
 

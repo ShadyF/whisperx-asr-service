@@ -1,0 +1,62 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: tests/requirements-ci.txt
+      - run: pip install -r tests/requirements-ci.txt
+      - name: Run unit tests
+        env:
+          PYTHONPATH: tests/e2e/stubs
+        run: python -m pytest -q -p no:cacheprovider tests/unit
+      # Keep fork test doubles separate from upstream module state.
+      - name: Run native decoder and VAD tests
+        env:
+          PYTHONPATH: tests/e2e/stubs
+        run: python -m pytest -q -p no:cacheprovider tests/test_pipeline_native.py tests/test_pipeline_vad.py
+
+  documented-defaults:
+    name: Documented defaults
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: tests/requirements-ci.txt
+      - run: pip install -r tests/requirements-ci.txt
+      - name: Run documented-defaults tests
+        env:
+          PYTHONPATH: tests/e2e/stubs
+        run: python -m pytest -q -p no:cacheprovider tests/defaults
+
+  stub-server:
+    name: Stub server end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: tests/requirements-ci.txt
+      - run: pip install -r tests/requirements-ci.txt
+      - name: Run stub-server tests
+        env:
+          PYTHONPATH: tests/e2e/stubs
+        run: python -m pytest -q -p no:cacheprovider tests/e2e

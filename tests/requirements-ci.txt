@@ -1,0 +1,13 @@
+# Lightweight dependencies for the CI tests. The heavy ML packages (torch,
+# whisperx, faster-whisper, pyannote) are replaced by tests/e2e/stubs.
+# Versions follow the service image (Dockerfile).
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.0
+prometheus-client==0.20.0
+numpy>=1.26,<2.3
+requests
+pyyaml
+pytest
+httpx<0.28

@@ -29,10 +29,12 @@ from app.pipeline import (
     COMPUTE_TYPE,
     BATCH_SIZE,
     DEFAULT_MODEL,
+    InvalidModelError,
     format_timestamp,
     sanitize_float_values,
     resolve_model_name,
-    get_canonical_models,
+    list_available_models,
+    describe_model_settings,
     _whisper_models as loaded_models,
 )
 from app import metrics as prom_metrics
@@ -62,15 +64,9 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1000"))
 
-MODEL_MAPPING = {
-    "whisper-1": os.getenv("OPENAI_WHISPER1_MODEL", DEFAULT_MODEL),
-    "whisper-large-v3": "large-v3",
-    "whisper-large-v2": "large-v2",
-    "whisper-medium": "medium",
-    "whisper-small": "small",
-    "whisper-base": "base",
-    "whisper-tiny": "tiny",
-}
+# Model names are resolved by app.pipeline.resolve_model_name, shared with
+# the simple-mode endpoints.
+logger.info(f"Models: {describe_model_settings()}")
 
 def _build_available_models():
     """
@@ -81,7 +77,7 @@ def _build_available_models():
     SDKs hard-code it; everything else is canonical.
     """
     models = [{"id": "whisper-1", "object": "model", "owned_by": "openai"}]
-    for name in get_canonical_models():
+    for name in list_available_models():
         models.append({"id": name, "object": "model", "owned_by": "whisperx"})
     return models
 
@@ -187,7 +183,7 @@ class ASRIngress:
         word_timestamps: bool = Query(True),
         output_format: str = Query("json"),
         output: Optional[str] = Query(None),
-        model: str = Query(DEFAULT_MODEL),
+        model: Optional[str] = Query(None),
         num_speakers: Optional[int] = Query(None),
         min_speakers: Optional[int] = Query(None),
         max_speakers: Optional[int] = Query(None),
@@ -205,8 +201,12 @@ class ASRIngress:
 
             # Map OpenAI-style aliases (whisper-tiny, whisper-large-v3, whisper-1, ...)
             # to canonical faster-whisper names so /asr accepts the same identifiers
-            # advertised by /v1/models.
-            model = resolve_model_name(model)
+            # advertised by /v1/models. No model means the default model; an
+            # unknown one is a client error.
+            try:
+                model = resolve_model_name(model)
+            except InvalidModelError as e:
+                raise HTTPException(status_code=400, detail=str(e))
 
             if diarize is not None or enable_diarization is not None:
                 should_diarize = (diarize is True) or (enable_diarization is True)
@@ -379,16 +379,10 @@ class ASRIngress:
     ):
         temp_audio_path = None
         try:
-            whisperx_model = MODEL_MAPPING.get(model)
-            if not whisperx_model:
-                if model in ["tiny", "base", "small", "medium", "large-v2", "large-v3"]:
-                    whisperx_model = model
-                else:
-                    return create_openai_error(
-                        400,
-                        f"Invalid model: {model}. Supported: whisper-1, or whisperx models",
-                        param="model",
-                    )
+            try:
+                whisperx_model = resolve_model_name(model)
+            except InvalidModelError as e:
+                return create_openai_error(400, str(e), param="model")
 
             if timestamp_granularities and response_format != ResponseFormat.VERBOSE_JSON:
                 return create_openai_error(
