@@ -1,6 +1,6 @@
 # WhisperX ASR API Service
 
-[![Version](https://img.shields.io/badge/version-0.4.5-blue.svg)](https://github.com/ShadyF/whisperx-asr-service/releases/tag/v0.4.5)
+[![Version](https://img.shields.io/badge/version-0.4.6-blue.svg)](https://github.com/ShadyF/whisperx-asr-service/releases/tag/v0.4.6)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Docker Build](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml)
 [![GHCR](https://img.shields.io/badge/GHCR-shadyf%2Fwhisperx--asr--service-blue?logo=github)](https://github.com/shadyf/whisperx-asr-service/pkgs/container/whisperx-asr-service)
@@ -349,7 +349,7 @@ curl -X POST http://localhost:9000/asr \
 
 `WHISPER_DECODE_MODE` is a process-wide startup setting. The default,
 `batched`, preserves the existing WhisperX batched transcription path. Set
-`WHISPER_DECODE_MODE=native` to retain the existing Pyannote ASR VAD and decode
+`WHISPER_DECODE_MODE=native` to use the selected WhisperX ASR VAD and decode
 each merged VAD chunk serially through the already-loaded faster-whisper model;
 it does not load a second Whisper model. `BATCH_SIZE` is ignored only in native
 mode. Alignment remains configurable with `ALIGN_DEVICE` (for example `cpu`),
@@ -374,6 +374,7 @@ use native mode when these thresholds must affect decoding. Values must satisfy
 
 ```yaml
 WHISPER_DECODE_MODE: native
+VAD_METHOD: pyannote
 NO_SPEECH_THRESHOLD: "0.6"
 COMPRESSION_RATIO_THRESHOLD: "2.4"
 LOG_PROB_THRESHOLD: "-1.0"
@@ -386,19 +387,34 @@ ALIGN_DEVICE: cpu
 
 #### ASR VAD and Speaker Diarization Are Separate
 
-`VAD_CHUNK_SIZE`, `VAD_ONSET`, and `VAD_OFFSET` configure speech-activity
+`VAD_METHOD`, `VAD_CHUNK_SIZE`, `VAD_ONSET`, and `VAD_OFFSET` configure speech-activity
 detection used while WhisperX constructs transcription segments. They are
 process-wide settings, read when the service starts and applied when each
-cached Whisper model is created; requests cannot override them. The initial
-Compose values are `20`, `.500`, and `.363` respectively (the application
-defaults are `30`, `.500`, and `.363` when these variables are absent).
+cached Whisper model is created; requests cannot override them. `VAD_METHOD`
+selects `pyannote` (default) or `silero` in both batched and native decoder modes.
+Native mode uses the selected WhisperX VAD, then decodes its merged chunks with
+the cached native faster-whisper model. Silero is opt-in and uses `VAD_ONSET`
+as its speech threshold and `VAD_CHUNK_SIZE` as its maximum speech duration.
+`VAD_OFFSET` is accepted and validated but has no effect on Silero detection or
+chunk merging.
+
+On first load, Silero uses `torch.hub` to download `snakers4/silero-vad` into
+the Torch Hub cache, separate from the Hugging Face model download directory.
+For offline use, preseed that cache and provide a writable, persisted Torch
+cache. The homelab deployment already sets `TORCH_HOME=/.cache/torch`.
+
+The method value is trimmed and lowercased. An unset, empty, or whitespace-only
+value selects `pyannote`; any other value outside `pyannote` and `silero` prevents
+startup. Compose defaults to `VAD_CHUNK_SIZE=20`, `VAD_ONSET=.500`, and
+`VAD_OFFSET=.363`. The application defaults to a 30-second chunk when
+`VAD_CHUNK_SIZE` is absent; onset and offset defaults are the same.
 
 Smaller chunks may reduce decoder repetition but lose some context and add
-processing overhead. Increasing `VAD_OFFSET` can end speech regions sooner,
+processing overhead. With Pyannote, increasing `VAD_OFFSET` can end speech regions sooner,
 but may clip quiet final words. Higher onset thresholds reject more noise but
 can miss quiet speech. `VAD_CHUNK_SIZE`
 must be an integer from 5 through 60, and thresholds must satisfy
-`0 <= VAD_OFFSET <= VAD_ONSET <= 1`; invalid values prevent startup.
+`0 <= VAD_OFFSET <= VAD_ONSET` and `0 < VAD_ONSET < 1`; invalid values prevent startup.
 
 These controls do **not** tune speaker labels or turn assignment. Those are
 handled by Pyannote diarization. In particular, `DIARIZE_PARAM_OVERRIDES`
@@ -573,7 +589,7 @@ COMPUTE_TYPE=float16
 BATCH_SIZE=16
 
 # Process-wide decoder mode. batched is the compatible default. native reuses
-# the cached faster-whisper model and existing Pyannote VAD, then decodes VAD
+# the cached faster-whisper model and selected WhisperX VAD, then decodes VAD
 # chunks serially. BATCH_SIZE is ignored only by native mode.
 WHISPER_DECODE_MODE=batched
 
@@ -611,9 +627,13 @@ MODEL_EVICTION_INTERVAL_SECONDS=60
 # ASR speech-activity detection. These settings are read at process startup
 # and passed when each cached Whisper model is built; they are not per-request
 # controls and do not affect Pyannote speaker diarization.
+# VAD_METHOD accepts pyannote (default) or silero in both decoder modes. Values
+# are trimmed and lowercased; unset/empty selects pyannote, invalid fails startup.
 # Smaller chunks add overhead but can follow boundaries more closely. Higher
 # thresholds reject more noise but can miss quiet speech. Values must satisfy
-# 5 <= VAD_CHUNK_SIZE <= 60 and 0 <= VAD_OFFSET <= VAD_ONSET <= 1.
+# 5 <= VAD_CHUNK_SIZE <= 60, 0 <= VAD_OFFSET <= VAD_ONSET, and 0 < VAD_ONSET < 1.
+# VAD_OFFSET affects only Pyannote; Silero uses onset and maximum chunk duration.
+VAD_METHOD=pyannote
 VAD_CHUNK_SIZE=20
 VAD_ONSET=.500
 VAD_OFFSET=.363
@@ -1295,6 +1315,13 @@ For issues and questions:
 - **Docker WhisperX:** [jim60105/docker-whisperX](https://github.com/jim60105/docker-whisperX)
 
 ## Changelog
+
+### v0.4.6 (2026-10-12)
+
+- Add upstream VAD method selection with `VAD_METHOD=pyannote|silero` in both native and batched decoder modes. Pyannote remains the default.
+- Preserve native decoding, configurable chunk sizes, decoder thresholds, serialized transcription, and dependency pins.
+- Reject onset values of 0 or 1 at startup to match WhisperX's supported range. Invalid VAD configuration continues to fail startup.
+- Document Silero's onset/chunk behavior, unused offset setting, and Torch Hub cache requirements. Extend VAD and decoder regression coverage; real-audio and GPU quality remain unverified.
 
 ### v0.4.5 (2026-10-02)
 

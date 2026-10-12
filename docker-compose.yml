@@ -53,6 +53,7 @@ services:
       - MODEL_KEEP_ALIVE_SECONDS=${MODEL_KEEP_ALIVE_SECONDS:-0}
       - MODEL_EVICTION_INTERVAL_SECONDS=${MODEL_EVICTION_INTERVAL_SECONDS:-60}
       # ASR speech-activity detection, separate from speaker diarization tuning
+      - VAD_METHOD=${VAD_METHOD:-pyannote}
       - VAD_CHUNK_SIZE=${VAD_CHUNK_SIZE:-20}
       - VAD_ONSET=${VAD_ONSET:-.500}
       - VAD_OFFSET=${VAD_OFFSET:-.363}

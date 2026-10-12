@@ -127,13 +127,20 @@ def _read_finite_float(name: str, default: str) -> float:
 
 
 # Read these once so every cached Whisper model in this process shares VAD settings.
+VAD_METHOD = (_env_or_none("VAD_METHOD") or "pyannote").lower()
+
+# Reject unsupported backends before WhisperX can construct a model.
+if VAD_METHOD not in ("pyannote", "silero"):
+    raise ValueError("VAD_METHOD must be either 'pyannote' or 'silero'.")
+
+# Preserve the fork's chunk and threshold defaults for either VAD backend.
 VAD_CHUNK_SIZE = _read_vad_chunk_size()
 VAD_ONSET = _read_finite_float("VAD_ONSET", ".500")
 VAD_OFFSET = _read_finite_float("VAD_OFFSET", ".363")
 
-# Validate the related thresholds together because offset must not exceed onset.
-if not 0 <= VAD_OFFSET <= VAD_ONSET <= 1:
-    raise ValueError("VAD thresholds must satisfy 0 <= VAD_OFFSET <= VAD_ONSET <= 1.")
+# Keep offset below onset and respect WhisperX's strict onset bounds.
+if not (0 < VAD_ONSET < 1 and 0 <= VAD_OFFSET <= VAD_ONSET):
+    raise ValueError("VAD thresholds must satisfy 0 <= VAD_OFFSET <= VAD_ONSET < 1 and 0 < VAD_ONSET.")
 
 # Read these once so native decodes and constructed batched options share settings.
 NO_SPEECH_THRESHOLD = _read_finite_float("NO_SPEECH_THRESHOLD", "0.6")
@@ -508,7 +515,8 @@ def load_whisper_model(model_name: str, _acquire: bool = False):
                 # Record immutable ASR VAD settings only when this cache entry is built.
                 logger.info("Loading WhisperX model: %s", model_name)
                 logger.info(
-                    "ASR VAD configuration: chunk_size=%d onset=%.3f offset=%.3f",
+                    "ASR VAD configuration: method=%s chunk_size=%d onset=%.3f offset=%.3f",
+                    VAD_METHOD,
                     VAD_CHUNK_SIZE,
                     VAD_ONSET,
                     VAD_OFFSET,
@@ -524,6 +532,7 @@ def load_whisper_model(model_name: str, _acquire: bool = False):
                     device=DEVICE,
                     compute_type=COMPUTE_TYPE,
                     download_root=CACHE_DIR,
+                    vad_method=VAD_METHOD,
                     vad_options={
                         "chunk_size": VAD_CHUNK_SIZE,
                         "vad_onset": VAD_ONSET,

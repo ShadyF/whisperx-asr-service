@@ -306,6 +306,28 @@ class TestPipelineNativeDecode(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "WHISPER_DECODE_MODE must be either"):
             self._pipeline(WHISPER_DECODE_MODE="invalid")
 
+    def test_silero_batched_dispatch_preserves_settings_and_options(self):
+        # Select Silero without changing the established batched decoder path.
+        pipeline = self._pipeline(VAD_METHOD="silero", VAD_CHUNK_SIZE="20")
+        wrapper = self._wrapper(pipeline, [], [])
+        expected = {"segments": [], "language": "en"}
+        wrapper.transcribe = Mock(return_value=expected)
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
+
+        # Dispatch a request through the shared loader and restore request options.
+        result = pipeline.transcribe([0] * 10, "tiny", language="en", hotwords="term")
+        self.assertIs(result, expected)
+        wrapper.transcribe.assert_called_once_with(
+            [0] * 10, batch_size=2, language="en", task="transcribe"
+        )
+        wrapper.model.transcribe.assert_not_called()
+        self.assertEqual(wrapper.options.hotwords, "saved-hotwords")
+        self.assertEqual(sys.modules["whisperx"].load_model.call_args.kwargs["vad_method"], "silero")
+        self.assertEqual(
+            sys.modules["whisperx"].load_model.call_args.kwargs["vad_options"],
+            {"chunk_size": 20, "vad_onset": .5, "vad_offset": .363},
+        )
+
     def test_native_uses_vad_chunks_and_flattens_clamped_monotonic_segments(self):
         # Arrange two merged VAD chunks and multiple local native segments.
         pipeline = self._pipeline(WHISPER_DECODE_MODE="native", VAD_CHUNK_SIZE="20")
@@ -379,6 +401,10 @@ class TestPipelineNativeDecode(unittest.TestCase):
         # Configure the native decoder thresholds at process startup.
         pipeline = self._pipeline(
             WHISPER_DECODE_MODE="native",
+            VAD_METHOD=" SiLeRo ",
+            VAD_CHUNK_SIZE="20",
+            VAD_ONSET="0.7",
+            VAD_OFFSET="0.4",
             NO_SPEECH_THRESHOLD="0.2",
             COMPRESSION_RATIO_THRESHOLD="3.3",
             LOG_PROB_THRESHOLD="-0.2",
@@ -395,6 +421,15 @@ class TestPipelineNativeDecode(unittest.TestCase):
         pipeline.transcribe([0] * 10)
 
         # Confirm native decoding receives the configured threshold values directly.
+        self.assertIsInstance(wrapper.vad_model, pipeline.Vad)
+        self.assertEqual(wrapper.vad_model.preprocessed, [0] * 10)
+        self.assertEqual(wrapper.vad_model.called_with, {"waveform": "waveform", "sample_rate": 10})
+        self.assertEqual(wrapper.vad_model.merged_with, ("vad-output", 20, .7, .4))
+        self.assertEqual(sys.modules["whisperx"].load_model.call_args.kwargs["vad_method"], "silero")
+        self.assertEqual(
+            sys.modules["whisperx"].load_model.call_args.kwargs["vad_options"],
+            {"chunk_size": 20, "vad_onset": .7, "vad_offset": .4},
+        )
         self.assertEqual(
             {
                 key: wrapper.model.transcribe.call_args.kwargs[key]
@@ -470,6 +505,26 @@ class TestPipelineNativeDecode(unittest.TestCase):
                 self.assertNotIn("nan", str(raised.exception))
                 self.assertIn("exception=ValueError", str(raised.exception))
                 self.assertNotIn("nan", "\n".join(logs.output).lower())
+
+    def test_native_vad_receives_16000_sample_rate_and_skips_silent_audio(self):
+        # Model the VAD interface without invoking an actual Silero model.
+        pipeline = self._pipeline(WHISPER_DECODE_MODE="native", VAD_METHOD="silero")
+        wrapper = self._wrapper(pipeline, [], [], preset_language="en")
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
+        audio = [0] * 16000
+
+        # Use the deployed sample rate rather than the fixture's shorter test scale.
+        with patch.object(pipeline, "SAMPLE_RATE", 16000):
+            result = pipeline.transcribe(audio)
+
+        # Empty VAD output must preserve the supplied waveform and skip decoding.
+        self.assertIs(wrapper.vad_model.preprocessed, audio)
+        self.assertEqual(
+            wrapper.vad_model.called_with,
+            {"waveform": "waveform", "sample_rate": 16000},
+        )
+        self.assertEqual(result, {"segments": [], "language": "en"})
+        wrapper.model.transcribe.assert_not_called()
 
     def test_native_uses_pyannote_vad_fallback_flow(self):
         pipeline = self._pipeline(WHISPER_DECODE_MODE="native")

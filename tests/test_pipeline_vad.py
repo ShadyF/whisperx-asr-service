@@ -93,6 +93,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
         pipeline = self._load_pipeline()
 
         # Confirm absent variables preserve the existing application defaults.
+        self.assertEqual(pipeline.VAD_METHOD, "pyannote")
         self.assertEqual(pipeline.VAD_CHUNK_SIZE, 30)
         self.assertEqual(pipeline.VAD_ONSET, 0.500)
         self.assertEqual(pipeline.VAD_OFFSET, 0.363)
@@ -110,6 +111,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             device="cpu",
             compute_type="int8",
             download_root="/.cache",
+            vad_method="pyannote",
             vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
             asr_options={
                 "no_speech_threshold": 0.6,
@@ -118,7 +120,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             },
         )
         self.assertIn(
-            "INFO:app.pipeline:ASR VAD configuration: chunk_size=30 onset=0.500 offset=0.363",
+            "INFO:app.pipeline:ASR VAD configuration: method=pyannote chunk_size=30 onset=0.500 offset=0.363",
             logs.output,
         )
         self.assertIn(
@@ -148,6 +150,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             device="cpu",
             compute_type="int8",
             download_root="/.cache",
+            vad_method="pyannote",
             vad_options={"chunk_size": 20, "vad_onset": 0.7, "vad_offset": 0.4},
             asr_options={
                 "no_speech_threshold": 0.7,
@@ -157,7 +160,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
         )
         self.assertEqual(
             [message for message in logs.output if "ASR VAD" in message],
-            ["INFO:app.pipeline:ASR VAD configuration: chunk_size=20 onset=0.700 offset=0.400"],
+            ["INFO:app.pipeline:ASR VAD configuration: method=pyannote chunk_size=20 onset=0.700 offset=0.400"],
         )
         self.assertEqual(
             [message for message in logs.output if "Whisper decoder configuration" in message],
@@ -166,6 +169,60 @@ class TestPipelineVadConfiguration(unittest.TestCase):
                 "compression_ratio=3.1 log_prob=-0.4"
             ],
         )
+
+    def test_vad_method_normalization_and_cache_in_both_decode_modes(self):
+        cases = ((None, "pyannote"), ("", "pyannote"), ("  ", "pyannote"),
+                 (" PyAnNoTe ", "pyannote"), (" SiLeRo ", "silero"))
+
+        # Exercise process-wide selection through the common model-loading seam.
+        for mode in ("batched", "native"):
+            for value, expected in cases:
+                with self.subTest(mode=mode, value=value):
+                    environment = {"WHISPER_DECODE_MODE": mode}
+                    if value is not None:
+                        environment["VAD_METHOD"] = value
+                    pipeline = self._load_pipeline(**environment)
+                    pipeline.whisperx.load_model.reset_mock()
+
+                    # Cache hits must retain the same wrapper and avoid another load.
+                    first = pipeline.load_whisper_model("small")
+                    with patch.dict(os.environ, {"VAD_METHOD": "invalid"}):
+                        second = pipeline.load_whisper_model("small")
+                    self.assertIs(first, second)
+                    self.assertEqual(pipeline.VAD_METHOD, expected)
+                    pipeline.whisperx.load_model.assert_called_once()
+                    self.assertEqual(pipeline.whisperx.load_model.call_args.kwargs["vad_method"], expected)
+
+    def test_invalid_vad_method_fails_before_model_loading(self):
+        # Reject unknown values rather than silently selecting another backend.
+        for value in ("invalid", "silero-vad", "pyannote,silero"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "VAD_METHOD must be either 'pyannote' or 'silero'"
+            ):
+                self._load_pipeline(VAD_METHOD=value)
+            sys.modules["whisperx"].load_model.assert_not_called()
+
+    def test_vad_onset_endpoints_fail_before_loading_for_both_methods(self):
+        # Reject onset endpoints that the pinned WhisperX VAD constructor rejects.
+        for method in ("pyannote", "silero"):
+            for onset in ("0", "1"):
+                with self.subTest(method=method, onset=onset), self.assertRaisesRegex(
+                    ValueError, "VAD thresholds must satisfy"
+                ):
+                    self._load_pipeline(VAD_METHOD=method, VAD_ONSET=onset, VAD_OFFSET="0")
+                sys.modules["whisperx"].load_model.assert_not_called()
+
+    def test_zero_offset_and_interior_onset_are_accepted_for_both_methods(self):
+        # Preserve zero offset while accepting onset values inside the strict bounds.
+        for method in ("pyannote", "silero"):
+            with self.subTest(method=method):
+                pipeline = self._load_pipeline(VAD_METHOD=method, VAD_ONSET="0.7", VAD_OFFSET="0")
+                pipeline.whisperx.load_model.reset_mock()
+                pipeline.load_whisper_model("small")
+                self.assertEqual(
+                    pipeline.whisperx.load_model.call_args.kwargs["vad_options"],
+                    {"chunk_size": 30, "vad_onset": .7, "vad_offset": 0.0},
+                )
 
     def test_decoder_configuration_logs_once_across_model_loads(self):
         pipeline = self._load_pipeline()
