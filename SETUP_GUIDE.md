@@ -309,6 +309,26 @@ docker compose restart
 
 ## Configuration
 
+### Optional decoder experiments
+
+The default decoder mode is `batched`. To experiment with native decoding
+without temperature fallback, add these settings to `.env`:
+
+```bash
+WHISPER_DECODE_MODE=native
+WHISPER_NATIVE_TEMPERATURES=0
+```
+
+Apply the settings with `docker compose up -d`. This experiment does not
+guarantee better accuracy or deterministic output. Keep the existing VAD and
+threshold defaults when comparing results on your audio.
+
+Shared beam width and the native-only temperature, sampling, previous-text
+conditioning, and prompt-scope settings are documented in the
+[README](README.md#decoder-experiment-controls). Unset or blank values use
+defaults; malformed values prevent startup. Native-only settings do not change
+batched fallback or previous-text conditioning.
+
 ### Performance Tuning
 
 Edit `.env` on the WhisperX service:

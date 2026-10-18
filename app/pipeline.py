@@ -94,6 +94,58 @@ if WHISPER_DECODE_MODE not in ("batched", "native"):
     raise ValueError("WHISPER_DECODE_MODE must be either 'batched' or 'native'.")
 
 
+def _read_positive_int(name: str, default: int) -> int:
+    """Read an optional positive decoder integer; blanks use the default."""
+    # Validate before any cached model can be constructed.
+    try:
+        value = int(_env_or_none(name) or str(default))
+    except ValueError:
+        raise ValueError(f"{name} must be a positive integer.") from None
+
+    # Reject zero and negative candidate counts.
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
+
+
+def _read_native_temperatures() -> Tuple[float, ...]:
+    """Read a finite temperature sequence; unset or blank uses the default."""
+    # Preserve CSV order and reject empty tokens instead of dropping them.
+    value = _env_or_none("WHISPER_NATIVE_TEMPERATURES") or "0.0,0.2,0.4,0.6,0.8,1.0"
+    try:
+        temperatures = tuple(float(token.strip()) for token in value.split(","))
+    except ValueError:
+        raise ValueError("WHISPER_NATIVE_TEMPERATURES must contain floats between 0 and 1.") from None
+
+    # Reject non-finite numbers before constructing decoder options.
+    if any(not math.isfinite(item) or not 0 <= item <= 1 for item in temperatures):
+        raise ValueError("WHISPER_NATIVE_TEMPERATURES must contain finite floats between 0 and 1.")
+    return temperatures
+
+
+def _read_native_condition_on_previous_text() -> bool:
+    """Read a strict optional boolean for context within one native call."""
+    # Normalize the established boolean spellings and default blank values.
+    value = (_env_or_none("WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT") or "false").lower()
+    if value in ("true", "1", "yes", "on"):
+        return True
+    if value in ("false", "0", "no", "off"):
+        return False
+    raise ValueError("WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT must be a boolean.")
+
+
+# Read decoder controls once; native context never crosses outer VAD chunks.
+WHISPER_BEAM_SIZE = _read_positive_int("WHISPER_BEAM_SIZE", 5)
+WHISPER_NATIVE_BEST_OF = _read_positive_int("WHISPER_NATIVE_BEST_OF", 5)
+WHISPER_NATIVE_TEMPERATURES = _read_native_temperatures()
+WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT = _read_native_condition_on_previous_text()
+WHISPER_NATIVE_PROMPT_SCOPE = (_env_or_none("WHISPER_NATIVE_PROMPT_SCOPE") or "first").lower()
+
+# Validate prompt scope before any request can reach a decoder.
+if WHISPER_NATIVE_PROMPT_SCOPE not in ("first", "all"):
+    raise ValueError("WHISPER_NATIVE_PROMPT_SCOPE must be either 'first' or 'all'.")
+
+
 def _read_vad_chunk_size() -> int:
     """Read and validate the process-wide ASR VAD chunk size."""
     value = os.getenv("VAD_CHUNK_SIZE", "30")
@@ -400,11 +452,18 @@ def log_decoder_configuration_once() -> None:
             return
         logger.info(
             "Whisper decoder configuration: mode=%s no_speech=%s "
-            "compression_ratio=%s log_prob=%s",
+            "compression_ratio=%s log_prob=%s beam_size=%s read_once=true "
+            "native_only_temperatures=%s native_only_best_of=%s "
+            "native_only_condition_on_previous_text=%s native_only_prompt_scope=%s",
             WHISPER_DECODE_MODE,
             NO_SPEECH_THRESHOLD,
             COMPRESSION_RATIO_THRESHOLD,
             LOG_PROB_THRESHOLD,
+            WHISPER_BEAM_SIZE,
+            WHISPER_NATIVE_TEMPERATURES,
+            WHISPER_NATIVE_BEST_OF,
+            WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT,
+            WHISPER_NATIVE_PROMPT_SCOPE,
         )
         _decoder_configuration_logged = True
 
@@ -523,6 +582,7 @@ def load_whisper_model(model_name: str, _acquire: bool = False):
                 )
                 # Configure batched TranscriptionOptions during model construction.
                 asr_options = {
+                    "beam_size": WHISPER_BEAM_SIZE,
                     "no_speech_threshold": NO_SPEECH_THRESHOLD,
                     "compression_ratio_threshold": COMPRESSION_RATIO_THRESHOLD,
                     "log_prob_threshold": LOG_PROB_THRESHOLD,
@@ -904,21 +964,6 @@ def _native_chunk_bounds(chunk: dict, sample_count: int) -> Tuple[int, int]:
     return start_index, end_index
 
 
-def _native_safe_chunk_bounds(chunk: dict) -> Tuple[str, str]:
-    """Return log-safe chunk bounds without exposing request data."""
-    # Parse only numeric VAD values for the safe error fields.
-    try:
-        start = float(chunk["start"])
-        end = float(chunk["end"])
-    except (KeyError, TypeError, ValueError):
-        return "unknown", "unknown"
-
-    # Reject non-finite values from the log fields as well as decoding.
-    if not math.isfinite(start) or not math.isfinite(end):
-        return "unknown", "unknown"
-    return f"{start:.3f}", f"{end:.3f}"
-
-
 def _native_transcribe(
     whisper_model: Any,
     audio: np.ndarray,
@@ -941,8 +986,10 @@ def _native_transcribe(
 
     # Decode each outer VAD span serially and preserve its internal silence.
     for chunk_index, chunk in enumerate(chunks):
-        # Prepare safe bounds before the per-chunk failure boundary begins.
-        safe_start, safe_end = _native_safe_chunk_bounds(chunk)
+        # Track only controlled diagnostic fields, never raw dependency values.
+        stage = "chunk_validation"
+        reason = "invalid_chunk"
+        segment_index = -1
 
         # Count every merged chunk before validating or invoking the decoder.
         prom_metrics.WHISPERX_DECODE_CHUNKS_TOTAL.labels(mode="native").inc()
@@ -953,48 +1000,69 @@ def _native_transcribe(
             chunk_end = end_index / SAMPLE_RATE
             chunk_audio = audio[start_index:end_index]
 
-            # Keep the prescribed native decoder options identical for every chunk.
+            # Build fresh options without carrying text between outer chunks.
+            # Beam size controls zero temperature; best_of controls sampling candidates.
             decode_options = {
                 "language": effective_language,
                 "task": task,
                 "hotwords": hotwords,
-                "initial_prompt": initial_prompt if chunk_index == 0 else None,
-                "condition_on_previous_text": False,
+                "initial_prompt": (
+                    initial_prompt
+                    if chunk_index == 0 or WHISPER_NATIVE_PROMPT_SCOPE == "all"
+                    else None
+                ),
+                "condition_on_previous_text": WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT,
                 "compression_ratio_threshold": COMPRESSION_RATIO_THRESHOLD,
                 "log_prob_threshold": LOG_PROB_THRESHOLD,
                 "no_speech_threshold": NO_SPEECH_THRESHOLD,
-                "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-                "beam_size": 5,
+                "temperature": list(WHISPER_NATIVE_TEMPERATURES),
+                "beam_size": WHISPER_BEAM_SIZE,
+                "best_of": WHISPER_NATIVE_BEST_OF,
                 "vad_filter": False,
                 "word_timestamps": False,
             }
 
-            # Exhaust the lazy generator before another shared-model decode begins.
+            # Identify immediate decoder failures separately from lazy execution.
+            stage, reason = "decoder_creation", "decoder_error"
             native_segments, _ = whisper_model.model.transcribe(chunk_audio, **decode_options)
-            native_segments = list(native_segments)
+
+            # Exhaust the lazy generator before another shared-model decode begins.
+            stage, reason = "lazy_iteration", "iteration_error"
+            segment_index = 0
+            decoded_segments = []
+            for native_segment in native_segments:
+                decoded_segments.append(native_segment)
+                segment_index += 1
 
             # Convert chunk-relative native segments into safe recording timestamps.
-            for native_segment in native_segments:
+            for segment_index, native_segment in enumerate(decoded_segments):
+                stage, reason = "timestamp_validation", "malformed_segment"
                 text = native_segment.text
                 if not text or not text.strip():
                     continue
+
+                # Parse timestamps without exposing malformed dependency values.
                 try:
+                    reason = "malformed_timestamp"
                     local_start = float(native_segment.start)
                     local_end = float(native_segment.end)
                 except (TypeError, ValueError) as error:
                     raise ValueError(
                         "Native Whisper segment has invalid timestamps."
                     ) from error
-                if (
-                    not math.isfinite(local_start)
-                    or not math.isfinite(local_end)
-                    or local_end < local_start
-                ):
+
+                # Distinguish non-finite values from reversed spans without logging values.
+                reason = "nonfinite_timestamp"
+                if not math.isfinite(local_start) or not math.isfinite(local_end):
+                    raise ValueError("Native Whisper segment has non-finite timestamps.")
+                reason = "reversed_timestamp"
+                if local_end < local_start:
                     raise ValueError(
                         "Native Whisper segment has a non-finite or reversed span."
                     )
 
                 # Clamp local timestamps to this outer chunk and prior output.
+                stage, reason = "timestamp_clamping", "collapsed_timestamp"
                 absolute_start = min(
                     max(chunk_start + local_start, chunk_start), chunk_end
                 )
@@ -1013,15 +1081,18 @@ def _native_transcribe(
         except Exception as error:
             # Emit and surface only safe fields when native processing fails.
             prom_metrics.WHISPERX_DECODE_FAILURES_TOTAL.labels(mode="native").inc()
+            exception_name = (
+                type(error).__name__
+                if type(error) in (ValueError, TypeError, RuntimeError, KeyError, AttributeError)
+                else "Exception"
+            )
             logger.error(
-                "Native Whisper decode failed for chunk start=%s end=%s exception=%s",
-                safe_start,
-                safe_end,
-                type(error).__name__,
+                "Native Whisper decode failed stage=%s chunk_index=%d segment_index=%d reason=%s exception=%s",
+                stage, chunk_index, segment_index, reason, exception_name,
             )
             raise NativeDecodeError(
-                "Native decode failed for chunk "
-                f"start={safe_start} end={safe_end} exception={type(error).__name__}"
+                f"Native decode failed stage={stage} chunk_index={chunk_index} "
+                f"segment_index={segment_index} reason={reason} exception={exception_name}"
             ) from None
 
     return {"segments": segments, "language": effective_language}

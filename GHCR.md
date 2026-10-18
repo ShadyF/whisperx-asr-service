@@ -2,7 +2,7 @@
 
 ASR API powered by WhisperX with speaker diarization, word-level timestamps, and OpenAI-compatible endpoints. Built for self-hosters running [Speakr](https://github.com/murtaza-nasir/speakr) or similar applications.
 
-Source, configuration reference, full API documentation, and changelog: https://github.com/murtaza-nasir/whisperx-asr-service
+Source, configuration reference, full API documentation, and changelog: https://github.com/ShadyF/whisperx-asr-service
 
 ## Image variants
 
@@ -10,8 +10,8 @@ Two variants are published per release. They share identical application code an
 
 | Tag | PyTorch | CUDA wheels | Supported GPUs |
 |-----|---------|-------------|----------------|
-| `:latest`, `:0.3.2` | 2.7.1 | cu126 | Pascal (10xx) through Hopper |
-| `:blackwell`, `:0.3.2-blackwell` | 2.8.0 | cu128 | Blackwell (RTX 50xx) |
+| `:latest`, `:0.4.7` | 2.7.1 | cu126 | Pascal (10xx) through Hopper |
+| `:blackwell`, `:0.4.7-blackwell` | 2.8.0 | cu128 | Blackwell (RTX 50xx) |
 
 If your GPU is an RTX 50xx, pull `:blackwell`. Every other NVIDIA card from 10xx onward should pull `:latest`.
 
@@ -91,7 +91,13 @@ Set `WHISPER_DECODE_MODE=native` when decoder thresholds must alter decoding.
 Pinned WhisperX batched generation receives the values but does not apply its
 fallback or silence-threshold logic. For multi-GPU, Ray Serve, pipeline
 strategies, hotwords, OpenAI-compatible parameters, offline use, and the full
-Prometheus metrics catalogue, see the [GitHub README](https://github.com/murtaza-nasir/whisperx-asr-service#readme).
+Prometheus metrics catalogue, see the [GitHub README](https://github.com/ShadyF/whisperx-asr-service#readme).
+
+Release `0.4.7` also exposes shared beam width and native-only fallback,
+conditioning, sampling, and prompt-scope experiments. See
+[Decoder experiment controls](https://github.com/ShadyF/whisperx-asr-service#decoder-experiment-controls)
+for defaults and startup validation. Native-only settings do not tune batched
+fallback or previous-text conditioning, and do not guarantee better accuracy.
 
 ## Source and license
 

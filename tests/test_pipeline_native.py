@@ -388,6 +388,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
                 "no_speech_threshold": 0.6,
                 "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
                 "beam_size": 5,
+                "best_of": 5,
                 "vad_filter": False,
                 "word_timestamps": False,
             },
@@ -576,6 +577,7 @@ class TestPipelineNativeDecode(unittest.TestCase):
         self.assertEqual(consumed, ["done"])
         self.assertNotIn("secret transcript", "\n".join(logs.output))
         self.assertNotIn("secret transcript", str(raised.exception))
+        self.assertIn("stage=decoder_creation chunk_index=1 segment_index=-1 reason=decoder_error", str(raised.exception))
         metrics = sys.modules["app.metrics"]
         self.assertEqual(metrics.WHISPERX_DECODE_CHUNKS_TOTAL.count, 2)
         self.assertEqual(metrics.WHISPERX_DECODE_FAILURES_TOTAL.count, 1)
@@ -601,6 +603,141 @@ class TestPipelineNativeDecode(unittest.TestCase):
         metrics = sys.modules["app.metrics"]
         self.assertEqual(metrics.WHISPERX_DECODE_CHUNKS_TOTAL.count, 1)
         self.assertEqual(metrics.WHISPERX_DECODE_FAILURES_TOTAL.count, 1)
+
+    def test_decoder_controls_validate_at_startup(self):
+        # Reject invalid values even when batched decoding is selected.
+        cases = {
+            "WHISPER_BEAM_SIZE": ("0", "-1", "1.5", "bad"),
+            "WHISPER_NATIVE_BEST_OF": ("0", "-2", "nan", "2.0"),
+            "WHISPER_NATIVE_TEMPERATURES": (",", "0,", ",0", "0,,1", "nan", "inf", "-inf", "-0.1", "1.1", "bad"),
+            "WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT": ("maybe", "2", "truthy"),
+            "WHISPER_NATIVE_PROMPT_SCOPE": ("last", "first,all"),
+        }
+        for name, values in cases.items():
+            for value in values:
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                    self._pipeline(**{name: value})
+
+    def test_decoder_controls_defaults_and_blank_values(self):
+        # Unset, empty, and whitespace values share the same startup defaults.
+        names = (
+            "WHISPER_BEAM_SIZE", "WHISPER_NATIVE_BEST_OF", "WHISPER_NATIVE_TEMPERATURES",
+            "WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT", "WHISPER_NATIVE_PROMPT_SCOPE",
+        )
+        for environment in ({}, dict.fromkeys(names, ""), dict.fromkeys(names, "  ")):
+            with self.subTest(environment=environment):
+                pipeline = self._pipeline(**environment)
+                self.assertEqual(pipeline.WHISPER_BEAM_SIZE, 5)
+                self.assertEqual(pipeline.WHISPER_NATIVE_BEST_OF, 5)
+                self.assertEqual(pipeline.WHISPER_NATIVE_TEMPERATURES, (0, .2, .4, .6, .8, 1))
+                self.assertFalse(pipeline.WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT)
+                self.assertEqual(pipeline.WHISPER_NATIVE_PROMPT_SCOPE, "first")
+
+    def test_native_condition_boolean_spellings(self):
+        # Accept only established boolean spellings after trimming and folding case.
+        for value in ("true", "1", "yes", "on", " TRUE ", "false", "0", "no", "off", " OFF "):
+            with self.subTest(value=value):
+                pipeline = self._pipeline(WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT=value)
+                self.assertEqual(pipeline.WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT, value.strip().lower() in ("true", "1", "yes", "on"))
+
+    def test_native_overrides_prompt_scope_and_request_isolation(self):
+        # Decode two requests on one cached model without carrying decoded history.
+        for scope in ("first", " ALL "):
+            with self.subTest(scope=scope):
+                pipeline = self._pipeline(
+                    WHISPER_DECODE_MODE="native", WHISPER_BEAM_SIZE="3",
+                    WHISPER_NATIVE_BEST_OF="2", WHISPER_NATIVE_TEMPERATURES=" 0, .7, 1 ",
+                    WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT="yes", WHISPER_NATIVE_PROMPT_SCOPE=scope,
+                )
+                wrapper = self._wrapper(pipeline, [{"start": 0, "end": 1}, {"start": 1, "end": 2}], [
+                    (iter([Segment(0, .5, "decoded history")]), None), (iter([]), None),
+                    (iter([]), None), (iter([]), None),
+                ])
+                setattr(sys.modules["whisperx"], "load_model", Mock(return_value=wrapper))
+
+                # Environment changes after import must not alter effective controls.
+                with patch.dict(os.environ, {"WHISPER_BEAM_SIZE": "99", "WHISPER_NATIVE_PROMPT_SCOPE": "invalid"}):
+                    pipeline.transcribe([0] * 20, "tiny", initial_prompt="first-request", hotwords="one")
+                    pipeline.transcribe([0] * 20, "tiny", initial_prompt="second-request", hotwords="two")
+
+                # Repeat only the request prompt, never prior decoded text.
+                calls = wrapper.model.transcribe.call_args_list
+                self.assertEqual([call.kwargs["initial_prompt"] for call in calls], [
+                    "first-request", "first-request" if scope.strip().lower() == "all" else None,
+                    "second-request", "second-request" if scope.strip().lower() == "all" else None,
+                ])
+                self.assertEqual([call.kwargs["hotwords"] for call in calls], ["one", "one", "two", "two"])
+                for call in calls:
+                    self.assertEqual(call.kwargs["beam_size"], 3)
+                    self.assertEqual(call.kwargs["best_of"], 2)
+                    self.assertEqual(call.kwargs["temperature"], [0, .7, 1])
+                    self.assertTrue(call.kwargs["condition_on_previous_text"])
+                self.assertEqual((wrapper.options.hotwords, wrapper.options.initial_prompt), ("saved-hotwords", "saved-prompt"))
+                self.assertEqual(pipeline._whisper_models_in_use, {})
+                self.assertEqual(sys.modules["whisperx"].load_model.call_count, 1)
+
+    def test_shared_beam_is_only_new_batched_constructor_option(self):
+        # Native-only settings are validated but never forwarded to WhisperX construction.
+        pipeline = self._pipeline(WHISPER_BEAM_SIZE="7", WHISPER_NATIVE_TEMPERATURES="0", WHISPER_NATIVE_BEST_OF="2", WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT="true", WHISPER_NATIVE_PROMPT_SCOPE="all")
+        pipeline.load_whisper_model("tiny")
+        self.assertEqual(sys.modules["whisperx"].load_model.call_args.kwargs["asr_options"], {
+            "beam_size": 7, "no_speech_threshold": .6, "compression_ratio_threshold": 2.4, "log_prob_threshold": -1,
+        })
+        self.assertEqual(pipeline.WHISPER_NATIVE_TEMPERATURES, (0,))
+
+    def test_single_zero_temperature_and_effective_configuration_log(self):
+        # Configure a zero-temperature decode without changing compute settings.
+        pipeline = self._pipeline(WHISPER_DECODE_MODE="native", WHISPER_BEAM_SIZE="1", WHISPER_NATIVE_BEST_OF="3", WHISPER_NATIVE_TEMPERATURES="0", WHISPER_NATIVE_PROMPT_SCOPE="all")
+        wrapper = self._wrapper(pipeline, [{"start": 0, "end": 1}], [(iter([]), None)])
+        setattr(sys.modules["whisperx"], "load_model", Mock(return_value=wrapper))
+
+        # The once-only summary must omit all request prompt and hotword contents.
+        with self.assertLogs("app.pipeline", "INFO") as logs:
+            pipeline.transcribe([0] * 10, "tiny", initial_prompt="secret prompt", hotwords="secret hotwords")
+            pipeline.log_decoder_configuration_once()
+        summaries = [line for line in logs.output if "Whisper decoder configuration" in line]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn("beam_size=1 read_once=true native_only_temperatures=(0.0,) native_only_best_of=3", summaries[0])
+        self.assertIn("native_only_condition_on_previous_text=False native_only_prompt_scope=all", summaries[0])
+        self.assertNotIn("secret", "".join(logs.output))
+        self.assertEqual(wrapper.model.transcribe.call_args.kwargs["temperature"], [0])
+        self.assertEqual(sys.modules["whisperx"].load_model.call_args.kwargs["compute_type"], "int8")
+
+    def test_native_failures_have_controlled_stage_and_reason(self):
+        # Model a generator that fails after producing speech without returning partial output.
+        def late_failure():
+            yield Segment(0, .2, "secret decoded text")
+            raise ValueError("secret dependency failure")
+
+        # Keep all timestamp behavior fail-closed, including mixed valid and invalid segments.
+        cases = (
+            ({"start": "secret chunk", "end": 1}, [], "chunk_validation", "invalid_chunk", -1),
+            ({"start": 0, "end": 1}, [ValueError("secret immediate failure")], "decoder_creation", "decoder_error", -1),
+            ({"start": 0, "end": 1}, [(late_failure(), None)], "lazy_iteration", "iteration_error", 1),
+            ({"start": 0, "end": 1}, [(iter([Segment("secret timestamp", .5, "secret text")]), None)], "timestamp_validation", "malformed_timestamp", 0),
+            ({"start": 0, "end": 1}, [(iter([Segment(0, float("nan"), "secret text")]), None)], "timestamp_validation", "nonfinite_timestamp", 0),
+            ({"start": 0, "end": 1}, [(iter([Segment(0, float("inf"), "secret text")]), None)], "timestamp_validation", "nonfinite_timestamp", 0),
+            ({"start": 0, "end": 1}, [(iter([Segment(.5, .2, "secret text")]), None)], "timestamp_validation", "reversed_timestamp", 0),
+            ({"start": 0, "end": 1}, [(iter([Segment(2, 3, "secret text")]), None)], "timestamp_clamping", "collapsed_timestamp", 0),
+            ({"start": 0, "end": 1}, [(iter([Segment(0, .5, "secret valid"), Segment(.1, .2, "secret invalid")]), None)], "timestamp_clamping", "collapsed_timestamp", 1),
+        )
+        for chunk, outputs, stage, reason, index in cases:
+            with self.subTest(stage=stage, reason=reason, index=index):
+                pipeline = self._pipeline(WHISPER_DECODE_MODE="native")
+                setattr(sys.modules["app.metrics"], "WHISPERX_DECODE_FAILURES_TOTAL", Counter())
+                wrapper = self._wrapper(pipeline, [chunk], outputs)
+                setattr(sys.modules["whisperx"], "load_model", Mock(return_value=wrapper))
+                with self.assertLogs("app.pipeline", "ERROR") as logs, self.assertRaises(pipeline.NativeDecodeError) as raised:
+                    pipeline.transcribe([0] * 10, initial_prompt="secret prompt", hotwords="secret hotwords")
+
+                # Diagnostics contain only bounded stages, indices, reasons, and exception classes.
+                message = str(raised.exception)
+                self.assertIn(f"stage={stage} chunk_index=0 segment_index={index} reason={reason}", message)
+                self.assertNotIn("secret", message + "".join(logs.output))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(raised.exception.__suppress_context__)
+                self.assertEqual(sys.modules["app.metrics"].WHISPERX_DECODE_FAILURES_TOTAL.labels_seen, [{"mode": "native"}])
+                self.assertEqual(pipeline._whisper_models_in_use, {})
 
     def test_transcription_refreshes_the_current_cached_wrapper_timestamp(self):
         pipeline = self._pipeline()

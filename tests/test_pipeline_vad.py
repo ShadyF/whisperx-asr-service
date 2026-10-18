@@ -114,6 +114,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             vad_method="pyannote",
             vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
             asr_options={
+                "beam_size": 5,
                 "no_speech_threshold": 0.6,
                 "compression_ratio_threshold": 2.4,
                 "log_prob_threshold": -1.0,
@@ -125,7 +126,9 @@ class TestPipelineVadConfiguration(unittest.TestCase):
         )
         self.assertIn(
             "INFO:app.pipeline:Whisper decoder configuration: mode=batched no_speech=0.6 "
-            "compression_ratio=2.4 log_prob=-1.0",
+            "compression_ratio=2.4 log_prob=-1.0 beam_size=5 read_once=true "
+            "native_only_temperatures=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0) native_only_best_of=5 "
+            "native_only_condition_on_previous_text=False native_only_prompt_scope=first",
             logs.output,
         )
 
@@ -153,6 +156,7 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             vad_method="pyannote",
             vad_options={"chunk_size": 20, "vad_onset": 0.7, "vad_offset": 0.4},
             asr_options={
+                "beam_size": 5,
                 "no_speech_threshold": 0.7,
                 "compression_ratio_threshold": 3.1,
                 "log_prob_threshold": -0.4,
@@ -166,7 +170,9 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             [message for message in logs.output if "Whisper decoder configuration" in message],
             [
                 "INFO:app.pipeline:Whisper decoder configuration: mode=batched no_speech=0.7 "
-                "compression_ratio=3.1 log_prob=-0.4"
+                "compression_ratio=3.1 log_prob=-0.4 beam_size=5 read_once=true "
+                "native_only_temperatures=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0) native_only_best_of=5 "
+                "native_only_condition_on_previous_text=False native_only_prompt_scope=first"
             ],
         )
 
@@ -240,7 +246,9 @@ class TestPipelineVadConfiguration(unittest.TestCase):
             ],
             [
                 "INFO:app.pipeline:Whisper decoder configuration: mode=batched "
-                "no_speech=0.6 compression_ratio=2.4 log_prob=-1.0"
+                "no_speech=0.6 compression_ratio=2.4 log_prob=-1.0 beam_size=5 read_once=true "
+                "native_only_temperatures=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0) native_only_best_of=5 "
+                "native_only_condition_on_previous_text=False native_only_prompt_scope=first"
             ],
         )
 

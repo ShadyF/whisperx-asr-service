@@ -1,6 +1,6 @@
 # WhisperX ASR API Service
 
-[![Version](https://img.shields.io/badge/version-0.4.6-blue.svg)](https://github.com/ShadyF/whisperx-asr-service/releases/tag/v0.4.6)
+[![Version](https://img.shields.io/badge/version-0.4.7-blue.svg)](https://github.com/ShadyF/whisperx-asr-service/releases/tag/v0.4.7)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Docker Build](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml)
 [![GHCR](https://img.shields.io/badge/GHCR-shadyf%2Fwhisperx--asr--service-blue?logo=github)](https://github.com/shadyf/whisperx-asr-service/pkgs/container/whisperx-asr-service)
@@ -168,7 +168,7 @@ Download the docker-compose.yml file and start the service:
 
 ```bash
 # Download docker-compose.yml
-curl -O https://raw.githubusercontent.com/murtaza-nasir/whisperx-asr-service/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/ShadyF/whisperx-asr-service/main/docker-compose.yml
 
 # RTX 50xx (Blackwell) only: switch to the blackwell image
 # sed -i 's|whisperx-asr-service:latest|whisperx-asr-service:blackwell|' docker-compose.yml
@@ -229,7 +229,7 @@ For development or if you want to build from source:
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/murtaza-nasir/whisperx-asr-service.git
+git clone https://github.com/ShadyF/whisperx-asr-service.git
 cd whisperx-asr-service
 ```
 
@@ -355,9 +355,9 @@ it does not load a second Whisper model. `BATCH_SIZE` is ignored only in native
 mode. Alignment remains configurable with `ALIGN_DEVICE` (for example `cpu`),
 and speaker diarization behavior is unchanged.
 
-Native mode uses conservative faster-whisper decoder rejection thresholds and
-fallback temperatures to reduce repetition on difficult chunks. It is an
-experiment: start with the existing VAD configuration
+Native mode exposes faster-whisper decoder rejection thresholds and fallback
+temperatures for experiments. These controls do not guarantee better accuracy.
+Start with the existing VAD configuration
 `VAD_CHUNK_SIZE=20`, `VAD_ONSET=.500`, and `VAD_OFFSET=.363` rather than
 changing those thresholds at the same time. Because decoding is serial, use
 `GPU_CONCURRENCY=1`; on constrained cards such as a GTX 1660, `ALIGN_DEVICE=cpu`
@@ -384,6 +384,36 @@ VAD_OFFSET: "0.363"
 GPU_CONCURRENCY: "1"
 ALIGN_DEVICE: cpu
 ```
+
+For an experiment without temperature fallback, add these settings to `.env`
+and recreate the service with `docker compose up -d`:
+
+```bash
+WHISPER_DECODE_MODE=native
+WHISPER_NATIVE_TEMPERATURES=0
+```
+
+A single temperature of `0` disables fallback, but does not guarantee
+deterministic output. Keep the existing VAD and decoder thresholds while
+comparing results on your own audio.
+
+`WHISPER_BEAM_SIZE` applies to both decoder modes. The four `WHISPER_NATIVE_*`
+controls apply only to native decoding; setting them in batched mode does not
+change batched fallback or previous-text conditioning. All five are read at
+startup: unset or blank values use their defaults, and malformed values prevent
+startup. See [Decoder experiment controls](#decoder-experiment-controls) for
+accepted values.
+
+In native mode, `WHISPER_NATIVE_PROMPT_SCOPE=first` sends `initial_prompt` only
+to the first outer VAD chunk. Set it to `all` to reuse that same prompt for
+every outer VAD chunk. Neither scope accumulates decoded history across chunks.
+`WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT` controls conditioning only within
+each native call. Hotwords continue to apply to every native chunk.
+
+Native decode failures log the stage, chunk index, segment index when available,
+and a controlled reason without prompt text, audio, or arbitrary exception
+messages. A failed chunk still fails the whole file; the service does not
+skip it or return a partial transcript.
 
 #### ASR VAD and Speaker Diarization Are Separate
 
@@ -593,6 +623,13 @@ BATCH_SIZE=16
 # chunks serially. BATCH_SIZE is ignored only by native mode.
 WHISPER_DECODE_MODE=batched
 
+# Decoder experiment controls (defaults shown; see the table below).
+WHISPER_BEAM_SIZE=5
+WHISPER_NATIVE_TEMPERATURES=0.0,0.2,0.4,0.6,0.8,1.0
+WHISPER_NATIVE_BEST_OF=5
+WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT=false
+WHISPER_NATIVE_PROMPT_SCOPE=first
+
 # Faster-whisper decoder thresholds. These affect decoding only in native mode;
 # pinned WhisperX batched generation does not apply fallback/silence logic.
 NO_SPEECH_THRESHOLD=0.6
@@ -663,6 +700,24 @@ VAD_OFFSET=.363
 # standing vocabulary/context biasing text
 # QWEN3_DEFAULT_CONTEXT=
 ```
+
+### Decoder experiment controls
+
+These process-wide settings preserve the default decoding behavior. Unset or
+blank values select the defaults below. Invalid values prevent startup in
+either decoder mode.
+
+| Variable | Default | Accepted values and effect |
+|----------|---------|----------------------------|
+| `WHISPER_BEAM_SIZE` | `5` | Positive integer. Beam width for native and WhisperX batched decoding; native uses it at temperature `0`. |
+| `WHISPER_NATIVE_TEMPERATURES` | `0.0,0.2,0.4,0.6,0.8,1.0` | Nonempty CSV of finite numbers from `0` through `1`. Native fallback temperature sequence. A single `0` disables fallback without guaranteeing determinism. |
+| `WHISPER_NATIVE_BEST_OF` | `5` | Positive integer. Native sampling candidate count at temperatures above `0`. |
+| `WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT` | `false` | Boolean `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off` (case-insensitive); other values fail startup. Native previous-text conditioning within each call, without history carried across outer VAD chunks. |
+| `WHISPER_NATIVE_PROMPT_SCOPE` | `first` | `first` or `all`. Send `initial_prompt` to the first outer VAD chunk or reuse it for every chunk, without accumulating decoded history. Native hotwords apply to every chunk in either scope. |
+
+The four native-only settings do not tune batched fallback or previous-text
+conditioning. See [Native decoding](#native-faster-whisper-decode-per-vad-chunk)
+for an experimental configuration and the existing threshold controls.
 
 ### Model Defaults and Preloading
 
@@ -1315,6 +1370,13 @@ For issues and questions:
 - **Docker WhisperX:** [jim60105/docker-whisperX](https://github.com/jim60105/docker-whisperX)
 
 ## Changelog
+
+### v0.4.7 (2026-10-18)
+
+- Expose shared beam width and native-only temperature fallback, sampling candidate count, previous-text conditioning, and initial-prompt scope controls. Defaults preserve existing decoding and threshold behavior.
+- Validate the new controls at startup. Unset or blank values use defaults; malformed values prevent startup.
+- Add safe native failure diagnostics with stage and chunk/segment indices and controlled reasons, without prompt text, audio, or arbitrary exception messages. Decode failures still fail the whole file.
+- Document native decoding experiments, including a single zero temperature to disable fallback. These settings make no accuracy or determinism guarantee.
 
 ### v0.4.6 (2026-10-12)
 

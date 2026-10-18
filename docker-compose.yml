@@ -34,6 +34,12 @@ services:
       - BATCH_SIZE=${BATCH_SIZE:-16}
       # Decoder path: batched preserves compatibility; native serializes VAD chunks.
       - WHISPER_DECODE_MODE=${WHISPER_DECODE_MODE:-batched}
+      # Beam width is shared; the remaining controls apply only to native decoding.
+      - WHISPER_BEAM_SIZE=${WHISPER_BEAM_SIZE:-5}
+      - WHISPER_NATIVE_TEMPERATURES=${WHISPER_NATIVE_TEMPERATURES:-0.0,0.2,0.4,0.6,0.8,1.0}
+      - WHISPER_NATIVE_BEST_OF=${WHISPER_NATIVE_BEST_OF:-5}
+      - WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT=${WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT:-false}
+      - WHISPER_NATIVE_PROMPT_SCOPE=${WHISPER_NATIVE_PROMPT_SCOPE:-first}
       # Native faster-whisper decoder thresholds; see README for batched limitation.
       - NO_SPEECH_THRESHOLD=${NO_SPEECH_THRESHOLD:-0.6}
       - COMPRESSION_RATIO_THRESHOLD=${COMPRESSION_RATIO_THRESHOLD:-2.4}
