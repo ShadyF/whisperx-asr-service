@@ -2,6 +2,8 @@
 
 import importlib
 import os
+from pathlib import Path
+import re
 import sys
 import threading
 import types
@@ -397,6 +399,44 @@ class TestPipelineNativeDecode(unittest.TestCase):
         self.assertEqual(second_kwargs["task"], "translate")
         self.assertEqual(second_kwargs["hotwords"], "term")
         self.assertIsNone(second_kwargs["initial_prompt"])
+
+    def test_readme_egyptian_recipe_reaches_native_decoder_without_forcing_language(self):
+        # Apply the copyable README environment just as an opt-in deployment does.
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        section = readme.split("### Egyptian Turbo (opt-in)", 1)[1]
+        block = re.search(r"```bash\n(.*?)```", section, re.S).group(1)
+        environment = dict(re.findall(r"^([A-Z_]+)=(.*)$", block, re.M))
+        pipeline = self._pipeline(**environment)
+        wrapper = self._wrapper(pipeline, [{"start": 0, "end": 1}], [(iter([]), None), (iter([]), None)])
+        sys.modules["whisperx"].load_model = Mock(return_value=wrapper)
+
+        # Substitute preparation only; observe the real loader and decode boundaries.
+        with patch.object(pipeline, "prepare_egyptian_model", return_value="/prepared/egyptian"):
+            result = pipeline.transcribe([0] * 10)
+            pipeline.transcribe([0] * 10, language="ar", initial_prompt="client context", hotwords="term")
+        wrapper.detect_language.assert_called_once_with([0] * 10)
+        self.assertEqual(result, {"segments": [], "language": "ar"})
+        loaded = sys.modules["whisperx"].load_model.call_args
+        self.assertEqual(loaded.args[0], "/prepared/egyptian")
+        self.assertEqual(loaded.kwargs["device"], "cuda")
+        self.assertEqual(loaded.kwargs["compute_type"], "int8_float16")
+        self.assertEqual(loaded.kwargs["vad_method"], "silero")
+
+        # Recipe decoding controls coexist with automatic language and explicit context.
+        first, explicit = wrapper.model.transcribe.call_args_list
+        self.assertIsNone(first.kwargs["initial_prompt"])
+        self.assertEqual(explicit.kwargs["initial_prompt"], "client context")
+        self.assertEqual(explicit.kwargs["hotwords"], "term")
+        for call in (first, explicit):
+            self.assertEqual(call.kwargs["language"], "ar")
+            self.assertEqual(call.kwargs["beam_size"], 8)
+            self.assertEqual(call.kwargs["best_of"], 5)
+            self.assertEqual(call.kwargs["temperature"], [0, .2, .4, .6, .8, 1])
+            self.assertFalse(call.kwargs["condition_on_previous_text"])
+            self.assertEqual(call.kwargs["no_speech_threshold"], .8)
+            self.assertEqual(call.kwargs["log_prob_threshold"], -.8)
+            self.assertEqual(call.kwargs["compression_ratio_threshold"], 2.4)
+        self.assertEqual(wrapper.vad_model.merged_with[1:3], (20, .5))
 
     def test_native_passes_configured_decoder_thresholds_directly(self):
         # Configure the native decoder thresholds at process startup.
