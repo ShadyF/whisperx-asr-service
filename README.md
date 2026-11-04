@@ -719,6 +719,87 @@ The four native-only settings do not tune batched fallback or previous-text
 conditioning. See [Native decoding](#native-faster-whisper-decode-per-vad-chunk)
 for an experimental configuration and the existing threshold controls.
 
+### Egyptian Turbo (opt-in)
+
+To select Egyptian Turbo, copy this complete recipe into the environment passed
+to the container. With the bundled Compose files, put it in `.env`; with
+`docker run`, pass the file using `--env-file`. For an externally managed
+deployment, set these same variables in that deployment's container environment.
+The recipe uses existing controls; leaving it unapplied preserves existing
+application, image and Compose defaults.
+
+```bash
+ASR_BACKEND=whisper
+DEFAULT_MODEL=mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching
+PRELOAD_MODEL=
+DEVICE=cuda
+COMPUTE_TYPE=int8_float16
+WHISPER_DECODE_MODE=native
+VAD_METHOD=silero
+VAD_CHUNK_SIZE=20
+VAD_ONSET=0.5
+WHISPER_BEAM_SIZE=8
+WHISPER_NATIVE_BEST_OF=5
+WHISPER_NATIVE_TEMPERATURES=0.0,0.2,0.4,0.6,0.8,1.0
+WHISPER_NATIVE_CONDITION_ON_PREVIOUS_TEXT=false
+NO_SPEECH_THRESHOLD=0.8
+LOG_PROB_THRESHOLD=-0.8
+COMPRESSION_RATIO_THRESHOLD=2.4
+CACHE_DIR=/.cache
+```
+
+**Model loading and access.** Empty `PRELOAD_MODEL` prepares and loads the model
+on first use. To attempt preparation during startup instead, set `PRELOAD_MODEL`
+to the same Egyptian model identifier. If you restrict models, include both
+`mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching` and `large-v3` in
+`ALLOWED_MODELS` to keep both explicitly selectable. The default model is always
+allowed. To keep the OpenAI alias `whisper-1` pointing at the selected default,
+leave `OPENAI_WHISPER1_MODEL` unset; an existing explicit alias setting takes
+precedence for requests using that alias.
+
+**Overrides and requests.** The container's effective environment overrides
+application fallbacks. Compose takes interpolation values from the shell before
+`.env` (or the selected `--env-file`); an existing exported variable can therefore
+override this recipe. Its `environment` entries override service `env_file`
+entries and image defaults. Review `docker compose config` before recreating the
+service. A `.env` file alone does not inject arbitrary new names into a container;
+the bundled Compose files forward every setting in this recipe. Settings are
+read at process startup, so changing them requires recreating the container.
+An explicit request model overrides `DEFAULT_MODEL`, subject to the allowlist;
+otherwise selection is `DEFAULT_MODEL`, then `PRELOAD_MODEL`, then `large-v3`.
+Decoder and VAD settings are process-wide, not per-request overrides.
+
+Omitting request `language` retains automatic detection. Sending `language=ar`
+is an optional client hint matching the selected ASR-only benchmark, not an
+implicit Arabic default. There is no default prompt or context to disable:
+omit client `initial_prompt`, `hotwords`, or OpenAI `prompt` for an unprompted
+request. Explicit client context remains supported. Alignment, diarization,
+timestamps and response formats retain their existing controls and behavior;
+the recipe does not disable them. Native decoding ignores `BATCH_SIZE`.
+Silero uses onset and chunk duration; `VAD_OFFSET` does not affect it.
+These settings do not promise identical benchmark output or verified GPU fit.
+
+**Cache and first load.** Persist `/.cache` with the existing cache volume and
+give the service user read/write and directory traversal permissions. Workers
+sharing prepared artifacts should use the same user, on a filesystem supporting
+POSIX locks and atomic directory renames. First preparation downloads pinned
+original weights and converts them once on CPU. Allow CPU/RAM for that work and
+several GB of free disk for source weights, conversion output and staging—not
+just the approximately 819 MB reference converted artifact. First-load duration
+and peak RAM have not been measured; allow for download and conversion before
+requests can complete. Valid completed artifacts are checked and reused across
+restarts with the same conversion identity.
+
+An uncached offline load fails. Offline operation also needs cached alignment
+and diarization assets when used, and Silero's separate Torch Hub cache. To
+persist that cache, explicitly pass `TORCH_HOME=/.cache/torch` to the container
+(add it to Compose's `environment` section, not only `.env`). Preparation
+failures are reported without substituting another model; startup preload logs
+a failure and leaves loading to a later request. Corrupt completed entries are
+rejected and retained for inspection. See
+[Egyptian model preparation](docs/egyptian-model-preparation.md) for pinned
+source identity, provenance, cache integrity and recovery details.
+
 ### Model Defaults and Preloading
 
 Three settings decide which Whisper model handles a request:

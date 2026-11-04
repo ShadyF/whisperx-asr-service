@@ -28,11 +28,16 @@ def client_for(monkeypatch):
         seen = {}
 
         def fake_pipeline(audio, model_name=None, **kwargs):
+            # Capture public request options without loading a model.
             seen["asr"] = model_name
+            seen["asr_options"] = kwargs
             return {"language": "en", "segments": [], "word_segments": []}, None
 
         def fake_transcribe_and_align(audio, model, *args, **kwargs):
+            # Capture OpenAI options before the substitute returns its response.
             seen["openai"] = model
+            seen["openai_args"] = args
+            seen["openai_options"] = kwargs
             return {"language": "en", "segments": [{"text": "hi", "start": 0.0, "end": 1.0}]}
 
         monkeypatch.setattr(main, "run_pipeline", fake_pipeline)
@@ -91,3 +96,50 @@ def test_models_list_matches_what_is_accepted(client_for):
     client, _ = client_for(ALLOWED_MODELS="turbo")
     ids = [m["id"] for m in client.get("/v1/models").json()["data"]]
     assert ids == ["whisper-1", "large-v3", "turbo"]
+
+
+@pytest.mark.parametrize("language", [None, "ar"])
+def test_egyptian_asr_keeps_language_context_and_feature_requests(client_for, language):
+    # Opt in through the existing model environment without selecting a language.
+    name = "mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching"
+    client, seen = client_for(DEFAULT_MODEL=name, PRELOAD_MODEL="")
+    params = {"initial_prompt": "technical context", "hotwords": "Kubernetes",
+              "word_timestamps": "true", "diarize": "true",
+              "return_speaker_embeddings": "true", "num_speakers": "2"}
+    if language is not None:
+        params["language"] = language
+
+    # Forward explicit context and feature controls while leaving detection automatic.
+    response = client.post("/asr", params=params, files=_audio())
+    assert response.status_code == 200, response.text
+    assert seen["asr"] == name
+    assert seen["asr_options"] == {
+        "language": language, "task": "transcribe", "initial_prompt": "technical context",
+        "hotwords": "Kubernetes", "word_timestamps": True, "should_diarize": True,
+        "num_speakers": 2, "min_speakers": None, "max_speakers": None,
+        "return_speaker_embeddings": True,
+    }
+    assert set(response.json()) == {"text", "language", "segments", "word_segments"}
+
+    # An explicit existing model still overrides the Egyptian deployment default.
+    response = client.post("/asr", params={"model": "large-v3", "diarize": "false"}, files=_audio())
+    assert response.status_code == 200, response.text
+    assert seen["asr"] == "large-v3"
+    assert seen["asr_options"]["should_diarize"] is False
+    assert seen["asr_options"]["initial_prompt"] is None
+
+
+@pytest.mark.parametrize("model,expected", [("whisper-1", None), ("large-v3", "large-v3")])
+def test_egyptian_openai_model_selection_keeps_existing_precedence(client_for, model, expected):
+    # The OpenAI alias follows the opt-in default unless the request names a model.
+    name = "mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching"
+    client, seen = client_for(DEFAULT_MODEL=name, PRELOAD_MODEL="")
+    response = client.post(
+        "/v1/audio/transcriptions", data={"model": model, "language": "ar", "prompt": "context"},
+        files={"file": ("a.wav", io.BytesIO(b"RIFF0000WAVE"), "audio/wav")},
+    )
+    assert response.status_code == 200, response.text
+    assert seen["openai"] == (expected or name)
+    assert seen["openai_args"][:2] == ("ar", "transcribe")
+    assert seen["openai_options"]["hotwords"] == "context"
+    assert response.json()["text"] == "hi"
