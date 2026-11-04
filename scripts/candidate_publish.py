@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -14,6 +15,9 @@ from urllib.request import Request, urlopen
 BRANCH = "refs/heads/feature/egyptian-turbo"
 IMAGE = "ghcr.io/shadyf/whisperx-asr-service"
 REPOSITORY = "shadyf/whisperx-asr-service"
+# Use a five-second readiness deadline and allow at most six reads.
+READINESS_SECONDS = 5
+READINESS_ATTEMPTS = 6
 ACCEPT = ", ".join([
     "application/vnd.oci.image.index.v1+json",
     "application/vnd.oci.image.manifest.v1+json",
@@ -29,14 +33,14 @@ def identity(ref, sha):
     return "egyptian-turbo-" + sha
 
 
-def manifest(token, reference):
+def manifest(token, reference, timeout=60):
     # Treat only explicit manifest absence as permission to create a new identity.
     request = Request(
         f"https://ghcr.io/v2/{REPOSITORY}/manifests/{reference}",
         headers={"Authorization": "Bearer " + token, "Accept": ACCEPT},
     )
     try:
-        with urlopen(request, timeout=60) as response:
+        with urlopen(request, timeout=timeout) as response:
             body = response.read()
             digest = "sha256:" + hashlib.sha256(body).hexdigest()
             if response.headers.get("Docker-Content-Digest") != digest:
@@ -53,6 +57,43 @@ def manifest(token, reference):
 
         # Preserve all other registry errors so publication stops safely.
         raise
+
+
+def ready_manifest(token, reference, expected_digest, stage, expected_content=None):
+    # Bound only explicit missing-manifest readiness by both time and read count.
+    deadline = time.monotonic() + READINESS_SECONDS
+    for attempt in range(READINESS_ATTEMPTS):
+        remaining = min(READINESS_SECONDS, deadline - time.monotonic())
+        if remaining <= 0:
+            break
+
+        # Read within the remaining readiness budget and preserve integrity errors.
+        try:
+            content = manifest(token, reference, timeout=remaining)
+        except ValueError as error:
+            # Preserve integrity failures while identifying the publication stage.
+            raise ValueError(
+                f"{stage}: invalid manifest for {reference}; expected {expected_digest}: {error}"
+            ) from error
+
+        # Present content is final: mismatches must never be retried or overwritten.
+        if content is not None:
+            if content[0] != expected_digest or (
+                expected_content is not None and content != expected_content
+            ):
+                raise ValueError(
+                    f"{stage}: wrong manifest for {reference}; expected {expected_digest}"
+                )
+            return content
+
+        # Pause only while another bounded read remains possible.
+        remaining = deadline - time.monotonic()
+        if attempt + 1 == READINESS_ATTEMPTS or remaining <= 0:
+            break
+        time.sleep(min(1, remaining))
+
+    # Identify the unavailable stage without exposing registry credentials.
+    raise ValueError(f"{stage}: manifest remains absent for {reference}; expected {expected_digest}")
 
 
 def put_manifest(token, tag, content):
@@ -78,8 +119,7 @@ def ensure_identity(token, tag, content):
 
     # Create only an absent identity and confirm the resulting registry content.
     put_manifest(token, tag, content)
-    if manifest(token, tag) != content:
-        raise ValueError("Commit-specific candidate verification failed")
+    ready_manifest(token, tag, content[0], "Just-written immutable tag", content)
     return content[0]
 
 
@@ -114,9 +154,9 @@ def main():
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ValueError("Invalid candidate digest")
     if content is None:
-        content = manifest(token, digest)
-    if content is None or content[0] != digest:
-        raise ValueError("Candidate digest is missing or conflicts with the commit tag")
+        content = ready_manifest(token, digest, digest, "Built digest")
+    if content[0] != digest:
+        raise ValueError(f"Existing immutable tag conflict for {tag}; expected {digest}")
     ensure_identity(token, tag, content)
 
     # Stale runs may preserve their SHA identity but cannot promote the trial alias.
@@ -126,8 +166,7 @@ def main():
     promoted = head == sha
     if promoted:
         put_manifest(token, "egyptian-turbo-test", content)
-        if manifest(token, "egyptian-turbo-test") != content:
-            raise ValueError("Trial alias verification failed")
+        ready_manifest(token, "egyptian-turbo-test", digest, "Just-written trial alias", content)
 
     # Record the immutable pull reference even when a stale run skips promotion.
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
