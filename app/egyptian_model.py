@@ -117,6 +117,7 @@ def _check_completed(target: Path, identity: dict) -> None:
         if manifest["files"] != _output_files(target):
             raise ValueError("output hashes differ")
     except (OSError, ValueError, KeyError, TypeError) as exc:
+        # Identify the rejected cache entry while preserving the original cause.
         raise ValueError(f"Egyptian cache integrity check failed at {target}: {exc}") from exc
 
 
@@ -161,4 +162,5 @@ def prepare_egyptian_model(cache_dir: str) -> str:
                 output.rename(target)
         return str(target)
     except Exception as exc:
+        # Report preparation failure with its cache location and original cause.
         raise RuntimeError(f"Egyptian model preparation failed in {cache_dir}: {exc}") from exc

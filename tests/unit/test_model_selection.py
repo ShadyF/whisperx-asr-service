@@ -232,6 +232,7 @@ def test_egyptian_failure_is_not_substituted(fresh, fake_loader, monkeypatch):
     p = fresh(DEFAULT_MODEL=name)
 
     def fail(cache):
+        # Simulate unavailable preparation without calling real model tools.
         raise RuntimeError("Egyptian preparation: offline")
 
     # A failed request must leave no loaded Egyptian or large-v3 cache entry.

@@ -27,6 +27,7 @@ class Registry:
     """Tiny transport substitute retaining exact manifest bytes and writes."""
 
     def __init__(self):
+        # Keep each test's manifests, writes and failures independent.
         self.manifests = {DIGEST: BODY}
         self.writes = []
         self.failure = None
@@ -36,13 +37,19 @@ class Registry:
         if request.full_url.startswith("https://ghcr.io/token?"):
             return io.BytesIO(b'{"token":"fake"}')
 
-        # Record real guard requests without replacing any publication functions.
+        # Identify the manifest requested by the publication guard.
         reference = request.full_url.rsplit("/", 1)[1]
+
+        # Simulate transport failures before reading or changing registry state.
         if self.failure is not None:
             raise self.failure
+
+        # Retain published bytes so later requests can verify the same content.
         if request.get_method() == "PUT":
             self.writes.append((reference, request.data))
             self.manifests[reference] = request.data
+
+        # Report explicit manifest absence separately from transport failures.
         if reference not in self.manifests:
             raise HTTPError(
                 request.full_url, 404, "missing", {},
