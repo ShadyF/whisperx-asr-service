@@ -43,12 +43,15 @@ def manifest(token, reference):
                 raise ValueError("Registry manifest digest does not match its content")
             return digest, body, response.headers["Content-Type"].split(";")[0]
     except HTTPError as error:
+        # Accept only explicit manifest absence as permission to publish a new tag.
         if error.code == 404:
             payload = json.loads(error.read())
             if payload.get("errors") and all(
                 item.get("code") == "MANIFEST_UNKNOWN" for item in payload["errors"]
             ):
                 return None
+
+        # Preserve all other registry errors so publication stops safely.
         raise
 
 

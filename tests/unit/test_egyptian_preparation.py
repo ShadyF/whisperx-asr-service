@@ -57,6 +57,7 @@ def tools(monkeypatch):
         chunk_length = 30
 
         def __init__(self, name):
+            # Keep the export filename for this processor or tokenizer substitute.
             self.name = name
 
         def save_pretrained(self, output):
@@ -164,7 +165,7 @@ def test_processes_publish_one_complete_artifact(tools, monkeypatch, tmp_path):
             events.get(timeout=0.3)
         assert not list((tmp_path / "egyptian-turbo").glob("*/provenance.json"))
     finally:
-        # Always release child processes, including when testing the unimplemented lock.
+        # Release and collect child processes even when an assertion fails.
         release.set()
         first.join(5)
         second.join(5)
@@ -271,6 +272,7 @@ def test_killed_preparation_is_not_a_completed_artifact(tools, monkeypatch, tmp_
         assert entered.wait(5)
         assert not list(tmp_path.glob("egyptian-turbo/*/provenance.json"))
     finally:
+        # Stop and collect the interrupted child even when an assertion fails.
         process.kill()
         process.join(5)
 
