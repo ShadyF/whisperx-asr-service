@@ -17,6 +17,7 @@ import threading
 import warnings
 from contextlib import contextmanager
 from typing import Optional, Dict, Any, Tuple, List
+from app.egyptian_model import MODEL_ID as EGYPTIAN_MODEL_ID, prepare_egyptian_model
 
 # Suppress pyannote's torchcodec warning -- we decode audio via whisperx.load_audio (ffmpeg),
 # not pyannote's built-in decoder, so the missing torchcodec is irrelevant.
@@ -587,8 +588,13 @@ def load_whisper_model(model_name: str, _acquire: bool = False):
                     "compression_ratio_threshold": COMPRESSION_RATIO_THRESHOLD,
                     "log_prob_threshold": LOG_PROB_THRESHOLD,
                 }
+
+                # Prepare only the pinned Egyptian model through the existing load path.
+                model_path = prepare_egyptian_model(CACHE_DIR) if model_name == EGYPTIAN_MODEL_ID else model_name
+
+                # Load the checked artifact with the same backend and decoding settings.
                 loaded = whisperx.load_model(
-                    model_name,
+                    model_path,
                     device=DEVICE,
                     compute_type=COMPUTE_TYPE,
                     download_root=CACHE_DIR,
