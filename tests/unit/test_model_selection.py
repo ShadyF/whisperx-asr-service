@@ -209,6 +209,78 @@ def test_a_loaded_model_is_reused(fresh, fake_loader):
     assert fake_loader == ["small"]
 
 
+def test_egyptian_selection_prepares_only_when_loaded(fresh, fake_loader, monkeypatch, tmp_path):
+    # Resolve the opt-in model without starting preparation.
+    name = "mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching"
+    p = fresh(DEFAULT_MODEL=name, ALLOWED_MODELS=f"{name},large-v3")
+    calls = []
+    monkeypatch.setattr(p, "prepare_egyptian_model", lambda cache: calls.append(cache) or str(tmp_path))
+    assert p.resolve_model_name(None) == name
+    assert calls == []
+
+    # Keep the public model identity while handing the local artifact to WhisperX.
+    p.load_whisper_model(p.resolve_model_name(None))
+    p.load_whisper_model("large-v3")
+    assert calls == [p.CACHE_DIR]
+    assert fake_loader == [str(tmp_path), "large-v3"]
+    assert name in p._whisper_models
+
+
+def test_egyptian_failure_is_not_substituted(fresh, fake_loader, monkeypatch):
+    # Surface preparation failure without calling the backend for a different model.
+    name = "mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching"
+    p = fresh(DEFAULT_MODEL=name)
+
+    def fail(cache):
+        raise RuntimeError("Egyptian preparation: offline")
+
+    # A failed request must leave no loaded Egyptian or large-v3 cache entry.
+    monkeypatch.setattr(p, "prepare_egyptian_model", fail)
+    with pytest.raises(RuntimeError, match="offline"):
+        p.transcribe(np.zeros(16, dtype=np.float32))
+    assert fake_loader == []
+    assert p._whisper_models == {}
+
+
+def test_egyptian_preload_and_allowlist_keep_existing_contract(fresh, fake_loader, monkeypatch, tmp_path):
+    # Preload prepares the explicit Egyptian model using the same identity as lazy loads.
+    name = "mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching"
+    p = fresh(PRELOAD_MODEL=name)
+    monkeypatch.setattr(p, "prepare_egyptian_model", lambda cache: str(tmp_path))
+    assert p.preload_whisper_model() == name
+    assert fake_loader == [str(tmp_path)]
+
+    # Opt-in support does not bypass deployment model restrictions or alter model listings.
+    p = fresh(ALLOWED_MODELS="large-v3")
+    with pytest.raises(p.InvalidModelError, match="not allowed"):
+        p.resolve_model_name(name)
+    assert p.list_available_models() == ["large-v3"]
+
+
+@pytest.mark.parametrize("language", [None, "ar", "en"])
+def test_egyptian_request_preserves_language_and_context(fresh, monkeypatch, tmp_path, language):
+    # Capture only the public Whisper wrapper call, using no inference or model weights.
+    name = "mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching"
+    p = fresh(DEFAULT_MODEL=name, WHISPER_DECODE_MODE="batched")
+    observed = []
+    model = FakeModel(str(tmp_path))
+
+    def transcribe(audio, **kwargs):
+        # Read temporary context while the request owns the decoder.
+        observed.append((kwargs, model.options.initial_prompt, model.options.hotwords))
+        return {"segments": [], "language": kwargs["language"] or "en"}
+
+    # Use the prepared artifact without changing request options or response keys.
+    monkeypatch.setattr(model, "transcribe", transcribe)
+    monkeypatch.setattr(p, "prepare_egyptian_model", lambda cache: str(tmp_path))
+    monkeypatch.setattr(p.whisperx, "load_model", lambda *args, **kwargs: model)
+    result = p.transcribe(np.zeros(16, dtype=np.float32), language=language, initial_prompt="context", hotwords="term")
+    assert observed == [({"batch_size": p.BATCH_SIZE, "language": language, "task": "transcribe"}, "context", "term")]
+    assert result == {"segments": [], "language": language or "en"}
+    assert model.options.initial_prompt is None
+    assert model.options.hotwords is None
+
+
 def test_max_loaded_models_unloads_the_least_recently_used(fresh, fake_loader):
     p = fresh(MAX_LOADED_MODELS="2")
     p.load_whisper_model("tiny")
