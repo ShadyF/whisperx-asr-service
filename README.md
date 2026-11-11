@@ -1,6 +1,6 @@
 # WhisperX ASR API Service
 
-[![Version](https://img.shields.io/badge/version-0.4.7-blue.svg)](https://github.com/ShadyF/whisperx-asr-service/releases/tag/v0.4.7)
+[![Version](https://img.shields.io/badge/version-0.4.8-blue.svg)](https://github.com/ShadyF/whisperx-asr-service/releases/tag/v0.4.8)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Docker Build](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/murtaza-nasir/whisperx-asr-service/actions/workflows/docker-publish.yml)
 [![GHCR](https://img.shields.io/badge/GHCR-shadyf%2Fwhisperx--asr--service-blue?logo=github)](https://github.com/shadyf/whisperx-asr-service/pkgs/container/whisperx-asr-service)
@@ -728,6 +728,11 @@ deployment, set these same variables in that deployment's container environment.
 The recipe uses existing controls; leaving it unapplied preserves existing
 application, image and Compose defaults.
 
+Egyptian Turbo is available in the normal standard and Blackwell images from
+v0.4.8 onward. Choose the image variant for your GPU as described in
+[GHCR image variants](GHCR.md). Images include conversion software, not model
+weights.
+
 ```bash
 ASR_BACKEND=whisper
 DEFAULT_MODEL=mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching
@@ -749,8 +754,19 @@ CACHE_DIR=/.cache
 ```
 
 **Model loading and access.** Empty `PRELOAD_MODEL` prepares and loads the model
-on first use. To attempt preparation during startup instead, set `PRELOAD_MODEL`
-to the same Egyptian model identifier. If you restrict models, include both
+on first use. To prepare and load it during startup instead, replace that line
+in the recipe with:
+
+```bash
+PRELOAD_MODEL=mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching
+```
+
+The first startup waits for download and CPU conversion before loading the
+model; later startups reuse the valid cached conversion. Allow enough startup
+time in your deployment's health checks. A preload failure is logged but does
+not stop the service, so a running service does not prove the model is ready.
+
+If you restrict models, include both
 `mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching` and `large-v3` in
 `ALLOWED_MODELS` to keep both explicitly selectable. The default model is always
 allowed. To keep the OpenAI alias `whisper-1` pointing at the selected default,
@@ -800,105 +816,10 @@ rejected and retained for inspection. See
 [Egyptian model preparation](docs/egyptian-model-preparation.md) for pinned
 source identity, provenance, cache integrity and recovery details.
 
-#### Candidate image and manual trial
-
-The isolated candidate uses the standard Linux amd64 image (Torch 2.7.1 / cu126),
-not the Blackwell variant. It includes conversion software, **not model weights**.
-Publication does not change the model or tuning defaults, deploy a service, or
-establish accuracy, performance, first-load resource use or GPU fit.
-
-**Publisher handoff.** After software review, push the reviewed integration commit
-to `feature/egyptian-turbo`. The separate candidate workflow runs on that branch
-push; it does not require a manual-dispatch workflow to exist on `main`. Never
-create a `v*` candidate tag: that triggers the normal release publisher, which
-writes `latest`. Candidate publication leaves that stable workflow untouched.
-The publishing run's job summary records the full source commit, immutable tag,
-resulting digest and digest-pinned image reference:
-
-- `ghcr.io/shadyf/whisperx-asr-service:egyptian-turbo-test` is the moving preview.
-- `ghcr.io/shadyf/whisperx-asr-service:egyptian-turbo-<full-source-commit>` identifies
-  one published commit. Use the recorded `ghcr.io/shadyf/whisperx-asr-service@sha256:…`
-  digest for a reproducible trial, not the moving tag.
-
-Candidate runs share a non-cancelling publication concurrency group. A rerun
-reuses an existing commit tag instead of rebuilding it; conflicting digests and
-registry errors stop publication. A run checks the current branch head before
-advancing the preview alias, so an older rerun does not deliberately roll it back.
-GitHub's branch check and GHCR's alias write are separate operations: a concurrent
-push can briefly leave the preview behind the branch. Use the recorded digest,
-and reserve candidate tag writes for this workflow; external writers are not
-protected by its concurrency group.
-
-Only use references from a successful publishing run for the reviewed commit.
-Registry authentication, package write permission or build failures must be
-resolved before handing over an image; a software-check pass is not publication.
-
-**Operator trial (optional; not an automated test).** Run these steps only on the
-deployment you intend to try. They recreate its service; they do not create an
-isolated second deployment. External homelab configuration remains operator-owned.
-
-1. Save the previous exact image digest and complete effective deployment
-   environment/configuration securely. Keep a protected copy as `.env.previous`
-   if using Compose; it may contain credentials. Do not rely on the current value
-   of `latest` for rollback. Preserve the existing model-cache volume.
-2. Copy your normal environment file to `.env.egyptian-trial` and apply the
-   **complete recipe above** to that copy, retaining other required settings and
-   credentials. Prepare writable persistent cache with several GB free, CPU/RAM
-   for first conversion, and initial network access as described above. Subsequent
-   starts reuse valid completed cache artifacts. Do not delete caches to roll back.
-3. Create this local Compose override and select the digest from the publishing
-   summary (replace the placeholder before running):
-
-   ```bash
-   export CANDIDATE_IMAGE='ghcr.io/shadyf/whisperx-asr-service@sha256:REPLACE_WITH_RECORDED_DIGEST'
-   cat > compose.egyptian-trial.yaml <<'YAML'
-   services:
-     whisperx-asr:
-       image: ${CANDIDATE_IMAGE:?Set CANDIDATE_IMAGE to the reviewed digest}
-       environment:
-         TORCH_HOME: /.cache/torch
-   YAML
-   docker pull "$CANDIDATE_IMAGE"
-   docker compose --env-file .env.egyptian-trial -f docker-compose.yml -f compose.egyptian-trial.yaml config
-   ```
-
-   Review the resolved image, settings and cache mount locally; `config` may
-   display secrets, so do not post its output. Exported shell variables override
-   `--env-file` values: unset conflicting exports before review. The override
-   changes only image selection and persistent Torch Hub cache, not the normal
-   Compose image default. Merely setting an image variable in `.env` does not
-   replace the base Compose file's literal `latest` image.
-4. When ready for your own trial, recreate with the same files:
-
-   ```bash
-   docker compose --env-file .env.egyptian-trial -f docker-compose.yml -f compose.egyptian-trial.yaml up -d --no-build whisperx-asr
-   ```
-
-   This starts the application. With the recipe's empty `PRELOAD_MODEL`, first
-   use prepares the model; explicit startup preload moves preparation to startup.
-   Manual transcription, alignment and diarization are separate user choices,
-   not checks already performed by publication.
-5. To roll back, restore **both** the saved image digest and previous environment.
-   Set `PREVIOUS_IMAGE` to that saved reference and use an image-only override,
-   with any original Compose overrides restored before this final override:
-
-   ```bash
-   export PREVIOUS_IMAGE='ghcr.io/shadyf/whisperx-asr-service@sha256:REPLACE_WITH_SAVED_PREVIOUS_DIGEST'
-   cat > compose.previous-image.yaml <<'YAML'
-   services:
-     whisperx-asr:
-       image: ${PREVIOUS_IMAGE:?Set PREVIOUS_IMAGE to the saved previous digest}
-   YAML
-   docker pull "$PREVIOUS_IMAGE"
-   docker compose --env-file .env.previous -f docker-compose.yml -f compose.previous-image.yaml config
-   docker compose --env-file .env.previous -f docker-compose.yml -f compose.previous-image.yaml up -d --no-build whisperx-asr
-   ```
-
-   Do not include the trial override during rollback. Unset conflicting shell
-   exports and review the resolved previous configuration before `up`. An image-only
-   rollback leaves Egyptian model selection/tuning enabled. Keep cache data and the saved
-   configuration until the trial is resolved. Merging, stable release and production
-   promotion each require a separate decision.
+Before changing a deployment, retain its previous versioned image tag and
+effective environment securely. To roll back, restore both: reverting only the
+image leaves Egyptian model selection and tuning enabled. Preserve the model
+cache volume. Deployment configuration remains operator-managed.
 
 ### Model Defaults and Preloading
 
@@ -1551,6 +1472,13 @@ For issues and questions:
 - **Docker WhisperX:** [jim60105/docker-whisperX](https://github.com/jim60105/docker-whisperX)
 
 ## Changelog
+
+### v0.4.8 (2026-11-11)
+
+- Add opt-in Egyptian Turbo support to both normal image variants without changing model or tuning defaults.
+- Download pinned weights and convert them on CPU on first load, with integrity-checked persistent cache reuse and coordinated preparation across workers.
+- Support Egyptian Turbo through existing request selection, `DEFAULT_MODEL` and `PRELOAD_MODEL`; document the complete tuning and startup-preload configuration.
+- Retire the trial-only image publisher. Verification covers software contracts with mocked model operations, not real conversion, inference or GPU compatibility.
 
 ### v0.4.7 (2026-10-18)
 

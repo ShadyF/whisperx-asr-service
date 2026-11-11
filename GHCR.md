@@ -10,8 +10,8 @@ Two variants are published per release. They share identical application code an
 
 | Tag | PyTorch | CUDA wheels | Supported GPUs |
 |-----|---------|-------------|----------------|
-| `:latest`, `:0.4.7` | 2.7.1 | cu126 | Pascal (10xx) through Hopper |
-| `:blackwell`, `:0.4.7-blackwell` | 2.8.0 | cu128 | Blackwell (RTX 50xx) |
+| `:latest`, `:0.4.8` | 2.7.1 | cu126 | Pascal (10xx) through Hopper |
+| `:blackwell`, `:0.4.8-blackwell` | 2.8.0 | cu128 | Blackwell (RTX 50xx) |
 
 If your GPU is an RTX 50xx, pull `:blackwell`. Every other NVIDIA card from 10xx onward should pull `:latest`.
 
@@ -93,7 +93,16 @@ fallback or silence-threshold logic. For multi-GPU, Ray Serve, pipeline
 strategies, hotwords, OpenAI-compatible parameters, offline use, and the full
 Prometheus metrics catalogue, see the [GitHub README](https://github.com/ShadyF/whisperx-asr-service#readme).
 
-Release `0.4.7` also exposes shared beam width and native-only fallback,
+Both variants support optional Egyptian Turbo selection and startup preload
+from release `0.4.8`. Set `DEFAULT_MODEL` and, for startup loading,
+`PRELOAD_MODEL` to `mohammedaly22/whisper-large-v3-turbo-egyptian-code-switching`.
+Weights download and convert on first load; persist the cache and allow CPU,
+RAM and several GB of disk for preparation. See the
+[complete Egyptian configuration](https://github.com/ShadyF/whisperx-asr-service#egyptian-turbo-opt-in)
+for tuning, cache permissions and preload failure behavior. Existing defaults
+are unchanged.
+
+Decoder controls expose shared beam width and native-only fallback,
 conditioning, sampling, and prompt-scope experiments. See
 [Decoder experiment controls](https://github.com/ShadyF/whisperx-asr-service#decoder-experiment-controls)
 for defaults and startup validation. Native-only settings do not tune batched

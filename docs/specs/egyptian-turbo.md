@@ -1,12 +1,12 @@
-# Egyptian Turbo integration and isolated candidate image
+# Egyptian Turbo integration
 
 ## Problem Statement
 
 The user prefers the Egyptian Whisper Turbo transcription samples for Egyptian Arabic mixed with English technical terms and wants this ASR service to use that model. The current service defaults to Whisper large-v3.
 
-The integration must preserve the service's existing API and capabilities, dynamically obtain and cache its model rather than bundle weights into Docker images, and retain automatic language detection. The user wants to try a separately tagged candidate image from a separate branch before approving a merge into main.
+The integration preserves the service's existing API and capabilities, dynamically obtains and caches its model rather than bundling weights into Docker images, and retains automatic language detection. Egyptian Turbo is an optional model in the normal standard and Blackwell images.
 
-The user explicitly does not want further model benchmarks, transcription-quality evaluations, or inference tests. The requested work is service integration and candidate-image delivery, not another model-selection experiment.
+Verification covers software integration without further model benchmarks, transcription-quality evaluations, or inference tests.
 
 ## Solution
 
@@ -14,14 +14,14 @@ Support opt-in Egyptian Turbo selection through the existing Whisper backend. Th
 
 Expose any necessary missing environment controls and document the complete selected Egyptian decoding and voice-activity-detection configuration in the README. Keep existing application, image and Compose defaults unchanged, along with automatic language detection, explicit request overrides, alignment, diarization and response contracts. This is the same application with an opt-in model, not a permanently separate product or a new ASR backend.
 
-Implement in an isolated worktree on `feature/egyptian-turbo`. Publish only candidate image tags: `ghcr.io/shadyf/whisperx-asr-service:egyptian-turbo-test` and a commit-specific `egyptian-turbo-<commit>` tag. Do not publish stable aliases, merge into main, issue a normal release, or change the live deployment. The user will test the candidate before deciding whether to merge and subsequently release it normally.
+Integrate into main and publish through the existing version-tag release workflow, starting with v0.4.8. Keep implementation isolated from unrelated changes. Live deployment remains operator-managed.
 
 ## User Stories
 
 ### Model selection and service compatibility
 
 1. As a service operator, I want to select Egyptian Turbo through environment configuration, so that I can opt in without changing existing defaults for other deployments.
-2. As an existing API client, I want the request and response contracts to remain compatible, so that adopting the candidate does not require rewriting my integration.
+2. As an existing API client, I want the request and response contracts to remain compatible, so that selecting Egyptian Turbo does not require rewriting my integration.
 3. As a service user, I want automatic language detection to remain the default, so that I do not have to supply a language for every request.
 4. As a service user, I want an explicitly supplied language to remain effective, so that I can request Arabic or another supported language deliberately.
 5. As a service user, I want large-v3 to remain selectable through the existing model configuration and request mechanisms, so that I retain control over which model is used.
@@ -45,18 +45,17 @@ Implement in an isolated worktree on `feature/egyptian-turbo`. Publish only cand
 17. As a service operator, I want concurrent model loads to coordinate preparation, so that multiple workers do not publish conflicting or incomplete cache entries.
 18. As a service operator, I want interrupted or invalid conversions rejected, so that incomplete files are never mistaken for a usable model.
 19. As a service operator, I want download and conversion failures reported clearly without silently substituting large-v3, so that I know which model actually serves my requests.
-20. As a service operator, I want first-load time, CPU/RAM needs, writable-cache requirements, and cache permissions documented, so that I can provision the candidate correctly.
+20. As a service operator, I want first-load time, CPU/RAM needs, writable-cache requirements, and cache permissions documented, so that I can provision the service correctly.
 21. As a maintainer, I want model provenance and the publisher's license declaration retained, so that the conversion's source and conditions are traceable.
 
-### Candidate delivery and review
+### Release delivery and review
 
 22. As a repository owner, I want implementation isolated on a separate branch and worktree, so that unrelated changes in the existing main checkout remain untouched.
-23. As a repository owner, I want a dedicated candidate Docker tag, so that I can pull the experimental application independently of the stable image.
-24. As a repository owner, I want a commit-specific candidate tag and recorded image identity, so that my feedback refers to an identifiable build.
-25. As a production operator, I want candidate publishing unable to overwrite stable tags or trigger a normal release, so that building the branch does not change production artifacts.
-26. As a repository owner, I want software-only verification using controlled substitutes, so that integration errors can be caught without more model downloads or inference as tests.
-27. As a repository owner, I want instructions for selecting the candidate image and returning to the existing image, so that I can conduct my own trial deliberately.
-28. As a repository owner, I want merging, stable release, and live deployment to require later explicit approval, so that publishing a candidate is not treated as approval to promote it.
+23. As a repository owner, I want Egyptian Turbo available in both normal image variants, so that I can select it without a separate publishing path.
+24. As a repository owner, I want versioned release tags, so that deployments can select an identifiable release.
+25. As a repository owner, I want software-only verification using controlled substitutes, so that integration errors can be caught without more model downloads or inference as tests.
+26. As a service operator, I want a copyable startup-preload example and rollback guidance, so that I can configure model loading deliberately.
+27. As a production operator, I want deployment to remain a separate action, so that publication does not change the running service.
 
 ## Implementation Decisions
 
@@ -99,15 +98,14 @@ The following values belong in a complete copyable README environment recipe. Th
 - Preserve existing application, image and Compose defaults and make environment/request precedence explicit. The deployer applies the README recipe, including when deployment configuration lives outside this repository.
 - These recommended values come from the selected Egyptian f01 ASR-only case, not the earlier Egyptian full-pipeline baseline. Automatic language detection intentionally differs from f01's explicit Arabic hint. Do not promise identical transcription samples from different language or feature choices.
 
-### Branch and candidate publication
+### Release publication
 
-- Isolate implementation on `feature/egyptian-turbo` in a separate worktree. Do not move, include, overwrite, or commit unrelated changes from the existing dirty main checkout.
-- Keep candidate builds on a separate branch-specific publishing path using the existing registry and standard Linux amd64 image platform/toolchain.
-- Publish `egyptian-turbo-test` and a commit-specific `egyptian-turbo-<commit>` tag under `ghcr.io/shadyf/whisperx-asr-service`. Record the resulting image digest/build identity for the user's trial.
-- Candidate builds must not publish `latest`, stable semantic-version tags, Blackwell aliases, or normal release artifacts. The existing version-tag workflow unconditionally publishes `latest`, so it must not be reused by creating a candidate `v*` tag.
-- Do not bundle model weights in the image, add a separate model-hosting account, or introduce a permanent Egyptian image variant.
-- Preserve existing stable publishing behavior outside the candidate path. A future merge, normal release, and live deployment are separate decisions; none is authorized by candidate publication.
-- Document candidate image selection and the previous-image rollback choice without editing or deploying live homelab configuration.
+- Prepare changes in a separate worktree without including unrelated changes.
+- Merge the reviewed integration into main and create the next normal patch release, v0.4.8.
+- Use the existing version-tag workflow for standard and Blackwell images, preserving its semantic-version and moving-tag behavior.
+- Include conversion software but obtain model weights dynamically at runtime.
+- Verify publication of both image variants before reporting the release available.
+- Document startup preload, cache requirements and rollback without editing or deploying live homelab configuration.
 
 ## Testing Decisions
 
@@ -117,9 +115,9 @@ The following values belong in a complete copyable README environment recipe. Th
 - Cover first preparation, valid cache reuse, simultaneous loads, interruption, incomplete/corrupt cache rejection, pinned-source/provenance changes, and clear failure without silent model substitution. Do not execute the real converter or download weights to perform these checks.
 - Reuse prior art from existing local-directory model-selection tests, decoder/VAD tests, documented-default tests, and stub-server end-to-end tests.
 - Verify unchanged baseline defaults, explicitly configured Egyptian values and override precedence across application/container/Compose/documentation. Do not test that a particular transcription is accurate or that output exactly matches a saved sample.
-- Check candidate workflow behavior for the intended branch/tags and prove stable aliases and release-trigger paths are excluded. Build/publish the candidate only through the approved candidate path.
+- Check that both normal release variants retain the software required for Egyptian preparation and verify their publication through the existing workflow.
 - Use the repository's established Docker/Compose workflow for development verification. Do not install project dependencies into the base OpenCode environment or the user's workstation.
-- No real model initialization/inference, ASR benchmark, quality evaluation, GPU smoke, or conversion-as-test is included. Software tests must use controlled substitutes and require no GPU or model-weight download. The user's later manual candidate trial is distinct from this automated verification scope.
+- No real model initialization/inference, ASR benchmark, quality evaluation, GPU smoke, or conversion-as-test is included. Software tests must use controlled substitutes and require no GPU or model-weight download.
 - No claim of new accuracy, performance, full-pipeline quality, or GPU-fit validation may be inferred from software tests or a successful image build.
 
 ## Out of Scope
@@ -129,16 +127,13 @@ The following values belong in a complete copyable README environment recipe. Th
 - New API routes, response formats, changed model/tuning/language defaults, or removal of existing alignment/diarization features.
 - Bundled model weights, a separately hosted converted-model repository, or generic conversion support for arbitrary model families.
 - Automatic fallback to large-v3 after an Egyptian preparation failure.
-- A permanently separate Egyptian product, additional candidate hardware/platform variants, or unrelated dependency/backend refactors.
-- Moving existing unrelated work into the candidate branch.
-- Merging into main, creating a stable release, overwriting stable image tags, editing live Kubernetes configuration, or deploying/replacing the current production service.
+- A permanently separate Egyptian product or unrelated dependency/backend refactors.
+- Moving existing unrelated work into the integration branch.
+- Editing live Kubernetes configuration or deploying/replacing the current production service.
 - Cleanup or deletion of earlier benchmark evidence or retained model-cache volumes.
 
 ## Further Notes
 
-- The user explicitly confirmed environment-driven opt-in integration: preserve capabilities and existing defaults, put the complete recommended Egyptian configuration in the README, retain automatic language detection and dynamic downloads/cache, convert the original model once rather than host/bundle the converted artifact, isolate the branch/image, and perform no further model tests.
-- Implementation follows child issues #2, #3 and #4 in dependency order. Their latest-scope clarification supersedes default-changing statements in the original published parent issue; the parent issue's body remains unchanged.
 - First preparation requires network access, CPU/RAM, and several GB of writable temporary/cache capacity for original weights, conversion output, and staging. The converted artifact alone is approximately 819 MB. Document measured/derived provisioning requirements without claiming a nearly full existing cache will suffice.
 - The preferred text samples are previous tuned ASR-only benchmark outputs, not the current production configuration. They are motivation for the user's choice, not a new accuracy guarantee or a test fixture that must be reproduced by real inference.
-- No project glossary or ADR was found during discovery. Terms here follow existing service usage: model selection, model preparation, model cache, transcription, alignment, diarization, and candidate release. This spec does not introduce new domain entities or require an ADR for a reversible preparation choice.
-- Track this spec in GitHub Issues for `ShadyF/whisperx-asr-service`, using the configured `ready-for-agent` label. Repository agent instructions define the tracker, triage vocabulary and single-context domain-document conventions. Implementation, candidate publication, merging and live deployment remain subject to the scope boundaries above.
+- Track this integration in [issue #1](https://github.com/ShadyF/whisperx-asr-service/issues/1).
